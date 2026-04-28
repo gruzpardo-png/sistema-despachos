@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block title %}Despachos | Ferretería San Pedro{% endblock %}
+{% block content %}
+<section class="hero">
+  <div>
+    <h1>Registro de entregas</h1>
+    <p>Control de documentos retirados/entregados, con bloqueo de duplicados, auditoría y exportación.</p>
+  </div>
+  <a class="secondary" href="{{ url_for('export_excel', start=start_date, end=end_date, q=q, status=selected_status) }}">Exportar Excel</a>
+</section>
+
+<section class="summary-grid">
+  <article class="metric"><span>Hoy</span><strong>{{ summary.today_total }}</strong><small>registros totales</small></article>
+  <article class="metric"><span>Pendientes / ruta</span><strong>{{ summary.pending }}</strong><small>requieren seguimiento</small></article>
+  <article class="metric"><span>Entregados hoy</span><strong>{{ summary.delivered_today }}</strong><small>cerrados</small></article>
+  <article class="metric danger"><span>Anulados hoy</span><strong>{{ summary.cancelled_today }}</strong><small>con motivo obligatorio</small></article>
+</section>
+
+<section class="grid-two">
+  <article class="card">
+    <div class="card-head">
+      <h2>Nuevo registro</h2>
+      <span class="badge">Anti duplicado activo</span>
+    </div>
+    <form method="post" action="{{ url_for('create_delivery') }}" class="delivery-form">
+      <div class="form-grid">
+        <label>Número documento *
+          <input name="doc_number" required placeholder="Ej: 123456">
+        </label>
+        <label>Tipo documento *
+          <select name="doc_type" required>
+            {% for item in doc_types %}<option value="{{ item }}">{{ item }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Estado inicial
+          <select name="status">
+            <option value="ENTREGADO">ENTREGADO / RETIRADO</option>
+            <option value="PENDIENTE">PENDIENTE</option>
+            <option value="EN_RUTA">EN RUTA</option>
+          </select>
+        </label>
+        <label>Cliente
+          <input name="customer" placeholder="Nombre cliente o empresa">
+        </label>
+        <label>Teléfono
+          <input name="phone" placeholder="+56 9...">
+        </label>
+        <label>Destino
+          <input name="destination" placeholder="Quillota, La Cruz, Limache...">
+        </label>
+        <label class="span-2">Dirección
+          <input name="address" placeholder="Dirección de entrega o referencia">
+        </label>
+        <label>Patente
+          <input name="license_plate" placeholder="ABCD12">
+        </label>
+        <label>Conductor
+          <input name="driver" placeholder="Nombre conductor">
+        </label>
+        <label>Pioneta
+          <input name="assistant" placeholder="Nombre apoyo">
+        </label>
+        <label class="span-2">Observación *
+          <textarea name="observation" required rows="4" placeholder="Quién retira, autorización, detalle de mercadería, condición especial..."></textarea>
+        </label>
+      </div>
+      <button class="primary" type="submit">Registrar entrega</button>
+    </form>
+  </article>
+
+  <aside class="card compact">
+    <div class="card-head"><h2>Auditoría reciente</h2></div>
+    <div class="timeline">
+      {% for log in recent_logs %}
+        <div class="timeline-item">
+          <strong>{{ log.action }}</strong>
+          <span>{{ log.created_at.strftime('%d-%m-%Y %H:%M') }}{% if log.user %} · {{ log.user.name }}{% endif %}</span>
+          <p>{{ log.detail or '' }}</p>
+        </div>
+      {% else %}
+        <p class="muted">Sin movimientos recientes.</p>
+      {% endfor %}
+    </div>
+  </aside>
+</section>
+
+<section class="card">
+  <div class="card-head table-title">
+    <div>
+      <h2>Consultas</h2>
+      <p>Máximo 500 registros visibles. La exportación considera hasta 10.000.</p>
+    </div>
+  </div>
+
+  <form method="get" action="{{ url_for('dashboard') }}" class="filters">
+    <label>Desde
+      <input type="date" name="start" value="{{ start_date }}">
+    </label>
+    <label>Hasta
+      <input type="date" name="end" value="{{ end_date }}">
+    </label>
+    <label>Estado
+      <select name="status">
+        <option value="">Todos</option>
+        {% for item in statuses %}<option value="{{ item }}" {% if selected_status == item %}selected{% endif %}>{{ item }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="search-field">Buscar
+      <input name="q" value="{{ q or '' }}" placeholder="Documento, cliente, destino, patente...">
+    </label>
+    <button class="secondary" type="submit">Filtrar</button>
+  </form>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Documento</th><th>Estado</th><th>Fecha</th><th>Cliente/Destino</th><th>Transporte</th><th>Obs.</th><th>Acciones</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in deliveries %}
+        <tr class="status-row {{ d.status|lower }}">
+          <td><strong>{{ d.doc_type }}</strong><br><span>{{ d.doc_number }}</span></td>
+          <td><span class="status {{ d.status|lower }}">{{ d.status }}</span></td>
+          <td>{{ d.created_at.strftime('%d-%m-%Y') }}<br><span>{{ d.created_at.strftime('%H:%M') }} · {{ d.registered_by.name }}</span></td>
+          <td><strong>{{ d.customer or 'Sin cliente' }}</strong><br><span>{{ d.destination or '' }} {{ d.address or '' }}</span></td>
+          <td>{{ d.license_plate or '-' }}<br><span>{{ d.driver or '' }}{% if d.assistant %} / {{ d.assistant }}{% endif %}</span></td>
+          <td class="obs">{{ d.observation }}{% if d.cancelled_reason %}<br><b>Motivo anulación:</b> {{ d.cancelled_reason }}{% endif %}</td>
+          <td class="actions">
+            {% if d.status != 'ANULADO' and current_user.role in ['ADMIN', 'SUPERVISOR', 'OPERADOR'] %}
+              <form method="post" action="{{ url_for('update_delivery_status', delivery_id=d.id) }}">
+                <select name="status" onchange="this.form.submit()">
+                  <option value="PENDIENTE" {% if d.status == 'PENDIENTE' %}selected{% endif %}>Pendiente</option>
+                  <option value="EN_RUTA" {% if d.status == 'EN_RUTA' %}selected{% endif %}>En ruta</option>
+                  <option value="ENTREGADO" {% if d.status == 'ENTREGADO' %}selected{% endif %}>Entregado</option>
+                </select>
+              </form>
+              {% if current_user.role in ['ADMIN', 'SUPERVISOR'] %}
+              <form method="post" action="{{ url_for('cancel_delivery', delivery_id=d.id) }}" class="cancel-form">
+                <input name="cancelled_reason" placeholder="Motivo anulación" required>
+                <button class="danger-button" type="submit">Anular</button>
+              </form>
+              {% endif %}
+            {% else %}
+              <span class="muted">Sin acciones</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="empty">No hay registros para los filtros seleccionados.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

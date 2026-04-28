@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Usuarios | Despachos{% endblock %}
+{% block content %}
+<section class="hero">
+  <div><h1>Usuarios y permisos</h1><p>Administra accesos internos del sistema.</p></div>
+</section>
+<section class="grid-two">
+  <article class="card">
+    <h2>Crear usuario</h2>
+    <form method="post" class="delivery-form">
+      <div class="form-grid">
+        <label>Nombre
+          <input name="name" required placeholder="Nombre completo">
+        </label>
+        <label>Usuario
+          <input name="username" required placeholder="usuario">
+        </label>
+        <label>Contraseña
+          <input type="password" name="password" required minlength="6" placeholder="mínimo 6 caracteres">
+        </label>
+        <label>Rol
+          <select name="role">
+            {% for role in roles %}<option value="{{ role }}">{{ role }}</option>{% endfor %}
+          </select>
+        </label>
+      </div>
+      <button class="primary" type="submit">Crear usuario</button>
+    </form>
+  </article>
+  <article class="card">
+    <h2>Roles recomendados</h2>
+    <p><b>ADMIN:</b> todo el sistema y usuarios.</p>
+    <p><b>SUPERVISOR:</b> registra, cambia estados y anula.</p>
+    <p><b>OPERADOR:</b> registra y cambia estados, no anula.</p>
+    <p><b>LECTURA:</b> solo consulta y exporta.</p>
+  </article>
+</section>
+<section class="card">
+  <h2>Usuarios existentes</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Nombre</th><th>Usuario</th><th>Rol</th><th>Estado</th><th>Acción</th></tr></thead>
+      <tbody>
+      {% for u in users %}
+        <tr>
+          <td>{{ u.name }}</td><td>{{ u.username }}</td><td>{{ u.role }}</td><td>{{ 'Activo' if u.active else 'Inactivo' }}</td>
+          <td>
+            {% if u.id != current_user.id %}
+            <form method="post" action="{{ url_for('toggle_user', user_id=u.id) }}">
+              <button class="secondary" type="submit">{{ 'Desactivar' if u.active else 'Activar' }}</button>
+            </form>
+            {% else %}<span class="muted">Usuario actual</span>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
