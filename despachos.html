@@ -1,0 +1,18 @@
+<form method="get" class="filters {{ extra_class|default('') }}">
+  <label>Desde<input type="date" name="start" value="{{ start_date }}"></label>
+  <label>Hasta<input type="date" name="end" value="{{ end_date }}"></label>
+  <label>Estado
+    <select name="status"><option value="">Todos</option>{% for item in statuses %}<option value="{{ item }}" {% if selected_status == item %}selected{% endif %}>{{ item }}</option>{% endfor %}</select>
+  </label>
+  <label>Tipo
+    <select name="doc_type"><option value="">Todos</option>{% for item in doc_types %}<option value="{{ item }}" {% if selected_doc_type == item %}selected{% endif %}>{{ item }}</option>{% endfor %}</select>
+  </label>
+  {% if users is defined %}
+  <label>Usuario
+    <select name="user_id"><option value="">Todos</option>{% for u in users %}<option value="{{ u.id }}" {% if selected_user_id|string == u.id|string %}selected{% endif %}>{{ u.name }}</option>{% endfor %}</select>
+  </label>
+  {% endif %}
+  <label class="search-field">Buscar<input name="q" value="{{ q or '' }}" placeholder="Documento, cliente, destino, patente, observación..."></label>
+  <button class="secondary" type="submit">Filtrar</button>
+  <a class="secondary" href="{{ url_for('export_excel', start=start_date, end=end_date, status=selected_status, doc_type=selected_doc_type, user_id=selected_user_id, q=q) }}">Exportar Excel</a>
+</form>

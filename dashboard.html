@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Despachos | Ferretería San Pedro{% endblock %}
+{% block content %}
+<section class="hero">
+  <div><h1>Nuevo registro</h1><p>Formulario rápido para registrar documentos entregados/retirados o pendientes. El usuario queda fijo desde la sesión.</p></div>
+  <a class="secondary" href="{{ url_for('consultas') }}">Ver consulta completa</a>
+</section>
+
+<section class="card focus-card">
+  <div class="card-head"><h2>Registrar documento</h2><span class="badge">Usuario: {{ current_user.username|upper }}</span></div>
+  <form method="post" action="{{ url_for('create_delivery') }}" class="delivery-form" autocomplete="off">
+    <div class="form-grid four">
+      <label>Número documento *<input name="doc_number" required placeholder="Ej: 123456" inputmode="numeric"></label>
+      <label>Tipo documento *<select name="doc_type" required>{% for item in doc_types %}<option value="{{ item }}">{{ item }}</option>{% endfor %}</select></label>
+      <label>Estado inicial *<select name="status"><option value="ENTREGADO">ENTREGADO / RETIRADO</option><option value="PENDIENTE">PENDIENTE</option></select></label>
+      <label>Monto documento<input name="amount" placeholder="Ej: 125000" inputmode="numeric"></label>
+      <label>Cliente<input name="customer" placeholder="Cliente o empresa"></label>
+      <label>Teléfono<input name="phone" placeholder="Puede quedar vacío"></label>
+      <label>Destino<input name="destination" placeholder="Comuna / referencia"></label>
+      <label>Patente<input name="license_plate" placeholder=""></label>
+      <label>Conductor<input name="driver" placeholder="Solo despacho interno"></label>
+      <label>Pioneta<input name="assistant" placeholder="Solo despacho interno"></label>
+      <label>Usuario<input value="{{ current_user.username|upper }}" readonly></label>
+      <label class="span-3">Observación<textarea name="observation" rows="3" placeholder="Detalle opcional: quién retira, condición especial, autorización, etc."></textarea></label>
+    </div>
+    <button class="primary full" type="submit">Guardar registro</button>
+  </form>
+</section>
+
+{% include "_summary.html" %}
+
+<section class="card">
+  <div class="card-head table-title"><div><h2>Registros del día / hoja de despacho</h2><p>Vista rápida para operación. Puedes filtrar por fechas o buscar documentos sin ir a consultas.</p></div></div>
+  {% set extra_class = 'compact-filters' %}{% include "_filters.html" %}
+  {% include "_table.html" %}
+</section>
+{% endblock %}

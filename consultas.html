@@ -1,0 +1,41 @@
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Documento</th><th>Estado</th><th>Monto</th><th>Fecha / usuario</th><th>Cliente</th><th>Destino</th><th>Transporte</th><th>Observación</th><th>Acciones</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for d in deliveries %}
+      <tr class="status-row {{ d.status|lower }}">
+        <td><strong>{{ d.doc_type }}</strong><br><span>{{ d.doc_number }}</span></td>
+        <td><span class="status {{ d.status|lower }}">{{ d.status }}</span></td>
+        <td><strong>{{ money(d.amount) }}</strong></td>
+        <td>{{ d.created_at.strftime('%d-%m-%Y') }}<br><span>{{ d.created_at.strftime('%H:%M') }} · {{ d.registered_by.name if d.registered_by else '-' }}</span></td>
+        <td><strong>{{ d.customer or '-' }}</strong><br><span>{{ d.phone or '' }}</span></td>
+        <td>{{ d.destination or '-' }}</td>
+        <td><strong>{{ d.license_plate or '-' }}</strong><br><span>{{ d.driver or '' }}{% if d.assistant %} / {{ d.assistant }}{% endif %}</span></td>
+        <td class="obs">{{ d.observation or '-' }}{% if d.cancelled_reason %}<br><b>Motivo anulación:</b> {{ d.cancelled_reason }}{% endif %}</td>
+        <td class="actions">
+          {% if d.status != 'ANULADO' and current_user.role in ['ADMIN','SUPERVISOR','OPERADOR'] %}
+          <form method="post" action="{{ url_for('update_delivery_status', delivery_id=d.id) }}">
+            <select name="status" onchange="this.form.submit()">
+              <option value="PENDIENTE" {% if d.status == 'PENDIENTE' %}selected{% endif %}>Pendiente</option>
+              <option value="ENTREGADO" {% if d.status == 'ENTREGADO' %}selected{% endif %}>Entregado / retirado</option>
+            </select>
+          </form>
+          {% if current_user.role in ['ADMIN','SUPERVISOR'] %}
+          <form method="post" action="{{ url_for('cancel_delivery', delivery_id=d.id) }}" class="cancel-form">
+            <input name="cancelled_reason" placeholder="Motivo" required>
+            <button class="danger-button" type="submit">Anular</button>
+          </form>
+          {% endif %}
+          {% else %}<span class="muted">Sin acciones</span>{% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="9" class="empty">No hay registros para los filtros seleccionados.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
