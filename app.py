@@ -3,6 +3,7 @@ import io
 import secrets
 from datetime import datetime, date, time
 from functools import wraps
+from zoneinfo import ZoneInfo
 
 from flask import Flask, request, redirect, url_for, flash, session, send_file, render_template_string
 from flask_sqlalchemy import SQLAlchemy
@@ -24,6 +25,19 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
 
 
+CHILE_TZ = ZoneInfo("America/Santiago")
+
+
+def chile_now():
+    """Hora local de Chile, guardada sin zona horaria para compatibilidad con SQLite/PostgreSQL."""
+    return datetime.now(CHILE_TZ).replace(tzinfo=None)
+
+
+def chile_today():
+    """Fecha actual en Chile, no en UTC del servidor Render."""
+    return chile_now().date()
+
+
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False, index=True)
@@ -31,7 +45,7 @@ class User(db.Model):
     password_hash = db.Column(db.String(255), nullable=False)
     role = db.Column(db.String(30), nullable=False, default="OPERADOR")
     active = db.Column(db.Boolean, nullable=False, default=True)
-    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, nullable=False, default=chile_now)
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -54,8 +68,8 @@ class Dispatch(db.Model):
     monto = db.Column(db.Integer, nullable=True)
     observacion = db.Column(db.Text, nullable=True)
     motivo_anulacion = db.Column(db.Text, nullable=True)
-    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
-    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, nullable=False, default=chile_now, index=True)
+    updated_at = db.Column(db.DateTime, nullable=False, default=chile_now, onupdate=chile_now)
     created_by_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
     created_by = db.relationship("User", foreign_keys=[created_by_id])
 
@@ -64,7 +78,7 @@ class AuditLog(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     action = db.Column(db.String(80), nullable=False)
     detail = db.Column(db.Text, nullable=True)
-    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=chile_now, index=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
     user = db.relationship("User")
 
@@ -143,7 +157,7 @@ def parse_int(value):
 
 
 def build_query():
-    today = date.today()
+    today = chile_today()
     start_date = parse_date(request.args.get("desde"), today)
     end_date = parse_date(request.args.get("hasta"), today)
     estado = request.args.get("estado", "").strip()
@@ -389,7 +403,7 @@ def page(title, body):
 <header class="topbar">
   <div class="brand">
     <img class="logo" src="https://ferreteriasanpedro.cl/wp-content/uploads/2018/10/hnuevo-logo-e1539849032205.png" onerror="this.style.display='none'">
-    <div><div class="brand-title">Ferretería San Pedro</div><div class="brand-sub">Sistema de entregas y retiros</div></div>
+    <div><div class="brand-title">Ferretería San Pedro</div><div class="brand-sub">Sistema de entregas y retiros · Hora Chile</div></div>
   </div>
   {nav}
 </header>
@@ -737,7 +751,7 @@ def anular(dispatch_id):
         return redirect(request.referrer or url_for("consultas"))
     despacho.estado = "ANULADO"
     despacho.motivo_anulacion = motivo
-    despacho.updated_at = datetime.utcnow()
+    despacho.updated_at = chile_now()
     db.session.commit()
     audit("ANULAR_DESPACHO", f"Documento {despacho.numero_documento}. Motivo: {motivo}")
     flash("Registro anulado correctamente.", "success")
@@ -756,7 +770,7 @@ def cambiar_estado(dispatch_id):
         flash("Estado inválido.", "warning")
         return redirect(request.referrer or url_for("consultas"))
     despacho.estado = nuevo_estado
-    despacho.updated_at = datetime.utcnow()
+    despacho.updated_at = chile_now()
     db.session.commit()
     audit("CAMBIAR_ESTADO", f"Documento {despacho.numero_documento} a {nuevo_estado}")
     flash("Estado actualizado.", "success")
