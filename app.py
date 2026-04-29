@@ -94,6 +94,29 @@ def create_admin_if_needed():
         db.session.add(admin)
         db.session.commit()
 
+    seed_machines = [
+        ("JAC CZ JR 23", "CAMIÓN", "CZ JR 23", "Bodega / Despacho", "JAC"),
+        ("KIA KJ HY 12", "CAMIÓN", "KJ HY 12", "Bodega / Despacho", "KIA"),
+        ("KIA JB LL 75", "CAMIÓN", "JB LL 75", "Bodega / Despacho", "KIA"),
+        ("LTRW80", "CAMIÓN", "LTRW80", "Bodega / Despacho", ""),
+        ("LTRW79", "CAMIÓN", "LTRW79", "Bodega / Despacho", ""),
+        ("Grúa horquilla Hangcha", "GRÚA HORQUILLA", "", "Bodega", "Hangcha"),
+        ("Grúa horquilla Sucursal 1 - 1", "GRÚA HORQUILLA", "", "Sucursal 1", ""),
+        ("Grúa horquilla Sucursal 1 - 2", "GRÚA HORQUILLA", "", "Sucursal 1", ""),
+    ]
+
+    for nombre, tipo, patente, sucursal, marca in seed_machines:
+        if not Machine.query.filter_by(nombre=nombre).first():
+            db.session.add(Machine(
+                nombre=nombre,
+                tipo=tipo,
+                patente_codigo=patente,
+                sucursal=sucursal,
+                marca_modelo=marca,
+                estado="OPERATIVA"
+            ))
+    db.session.commit()
+
 
 with app.app_context():
     db.create_all()
@@ -183,12 +206,7 @@ def build_query():
         query = query.filter(
             db.or_(
                 Dispatch.numero_documento.ilike(like),
-                Dispatch.cliente.ilike(like),
-                Dispatch.telefono.ilike(like),
-                Dispatch.destino.ilike(like),
                 Dispatch.placa_patente.ilike(like),
-                Dispatch.conductor.ilike(like),
-                Dispatch.pioneta.ilike(like),
                 Dispatch.observacion.ilike(like),
             )
         )
@@ -347,7 +365,10 @@ th{background:#f8fafc;position:sticky;top:0}
 .status{border-radius:999px;padding:4px 8px;font-size:10px;font-weight:900}
 .ENTREGADO_RETIRADO{background:#dcfce7;color:#166534}
 .PENDIENTE{background:#fef9c3;color:#854d0e}
-.ANULADO{background:#fee2e2;color:#991b1b}
+.ANULADO,.FUERA{background:#fee2e2;color:#991b1b}
+.REALIZADA,.OPERATIVA{background:#dcfce7;color:#166534}
+.PROGRAMADA,.PENDIENTE{background:#fef9c3;color:#854d0e}
+.OBSERVADA,.EN{background:#ffedd5;color:#9a3412}
 .alert{padding:10px 12px;border-radius:10px;margin-bottom:8px;font-weight:700}
 .alert-success{background:#dcfce7;color:#166534}
 .alert-danger{background:#fee2e2;color:#991b1b}
@@ -358,6 +379,9 @@ th{background:#f8fafc;position:sticky;top:0}
 .rowline{display:flex;justify-content:space-between;border-bottom:1px solid #e5e7eb;padding:8px 0}
 .compact-form-card{padding:14px 18px 16px}
 .compact-form-card h2{margin-bottom:12px}
+.dispatch-grid .obs-inline{grid-column:2 / -1}
+.maintenance-grid .obs-inline{grid-column:3 / -1}
+.simple-table{min-width:900px}
 .compact-save{
   margin-top:2px;
   height:40px;
@@ -382,6 +406,8 @@ def page(title, body):
             <a href="{url_for('despachos')}">Despachos</a>
             <a href="{url_for('dashboard')}">Dashboard</a>
             <a href="{url_for('consultas')}">Consultas</a>
+            <a href="{url_for('mantenciones')}">Mantenciones</a>
+            {'<a href="' + url_for('maquinarias') + '">Maquinarias</a>' if user.role in ['ADMIN', 'SUPERVISOR'] else ''}
             {'<a href="' + url_for('users') + '">Usuarios</a>' if user.role == 'ADMIN' else ''}
             <span class="pill">{user.name} · {user.role}</span>
             <a class="exit" href="{url_for('logout')}">Salir</a>
@@ -492,28 +518,22 @@ def table_html(registros, title="Registros"):
           <td>{r.tipo_documento}</td>
           <td><span class="status {r.estado}">{estado_text}</span></td>
           <td>{monto}</td>
-          <td>{r.cliente or ""}</td>
-          <td>{r.telefono or ""}</td>
-          <td>{r.destino or ""}</td>
           <td>{r.placa_patente or ""}</td>
-          <td>{r.conductor or ""}</td>
-          <td>{r.pioneta or ""}</td>
           <td>{r.created_by.name if r.created_by else ""}</td>
           <td>{r.observacion or ""}</td>
           <td>{acciones}</td>
         </tr>
         """
     if not rows:
-        rows = '<tr><td colspan="14" style="text-align:center;color:#64748b;padding:25px">Sin registros.</td></tr>'
+        rows = '<tr><td colspan="9" style="text-align:center;color:#64748b;padding:25px">Sin registros.</td></tr>'
     return f"""
     <section class="card">
       <h2>{title}</h2>
       <div class="table-wrap">
-        <table>
+        <table class="simple-table">
           <thead><tr>
             <th>Fecha</th><th>Documento</th><th>Tipo</th><th>Estado</th><th>Monto</th>
-            <th>Cliente</th><th>Teléfono</th><th>Destino</th><th>Patente</th>
-            <th>Conductor</th><th>Pioneta</th><th>Usuario</th><th>Observación</th><th>Acción</th>
+            <th>Patente</th><th>Usuario</th><th>Observación</th><th>Acción</th>
           </tr></thead>
           <tbody>{rows}</tbody>
         </table>
@@ -590,12 +610,12 @@ def despachos():
             numero_documento=numero,
             tipo_documento=tipo,
             estado=estado,
-            cliente=request.form.get("cliente", "").strip(),
-            telefono=request.form.get("telefono", "").strip(),
-            destino=request.form.get("destino", "").strip(),
+            cliente="",
+            telefono="",
+            destino="",
             placa_patente=request.form.get("placa_patente", "").strip().upper(),
-            conductor=request.form.get("conductor", "").strip(),
-            pioneta=request.form.get("pioneta", "").strip(),
+            conductor="",
+            pioneta="",
             monto=parse_int(request.form.get("monto")),
             observacion=request.form.get("observacion", "").strip(),
             created_by_id=session.get("user_id"),
@@ -611,21 +631,16 @@ def despachos():
     resumen = summary_for(query)
 
     form = """
-    <div><h1>Nuevo registro</h1><p class="muted">Formulario rápido para registrar documentos entregados, retirados o pendientes.</p></div>
+    <div><h1>Nuevo registro</h1><p class="muted">Registro simplificado de documentos entregados, retirados o pendientes.</p></div>
     <section class="card compact-form-card">
       <h2>Registrar documento</h2>
-      <form method="post" class="grid">
+      <form method="post" class="grid dispatch-grid">
         <div><label>Número documento *</label><input name="numero_documento" required placeholder="Ej: 123456"></div>
         <div><label>Tipo documento *</label><select name="tipo_documento" required><option value="BOLETA">BOLETA</option><option value="FACTURA">FACTURA</option><option value="GUÍA">GUÍA</option></select></div>
         <div><label>Estado inicial *</label><select name="estado" required><option value="ENTREGADO_RETIRADO">ENTREGADO / RETIRADO</option><option value="PENDIENTE">PENDIENTE</option></select></div>
         <div><label>Monto documento</label><input name="monto" placeholder="Ej: 125000"></div>
-        <div><label>Cliente</label><input name="cliente" placeholder="Cliente o empresa"></div>
-        <div><label>Teléfono</label><input name="telefono"></div>
-        <div><label>Destino</label><input name="destino" placeholder="Comuna / referencia"></div>
-        <div><label>Patente</label><input name="placa_patente"></div>
-        <div><label>Conductor</label><input name="conductor" placeholder="Solo despacho interno"></div>
-        <div><label>Pioneta</label><input name="pioneta" placeholder="Solo despacho interno"></div>
-        <div class="full"><label>Observación</label><textarea name="observacion" rows="2" placeholder="Quién retira, condición especial, autorización, etc."></textarea></div>
+        <div><label>Patente</label><input name="placa_patente" placeholder="Ej: ABCD12"></div>
+        <div class="obs-inline"><label>Observación</label><input name="observacion" placeholder="Quién retira, autorización, condición especial, nota de bodega, etc."></div>
         <button class="btn primary full compact-save" type="submit">Guardar registro</button>
       </form>
     </section>
@@ -725,10 +740,10 @@ def exportar():
     wb = Workbook()
     ws = wb.active
     ws.title = "Despachos"
-    headers = ["ID", "Número Documento", "Tipo Documento", "Estado", "Fecha y Hora", "Usuario", "Cliente", "Teléfono", "Destino", "Patente", "Conductor", "Pioneta", "Monto", "Observación", "Motivo Anulación"]
+    headers = ["ID", "Número Documento", "Tipo Documento", "Estado", "Fecha y Hora", "Usuario", "Patente", "Monto", "Observación", "Motivo Anulación"]
     ws.append(headers)
     for r in registros:
-        ws.append([r.id, r.numero_documento, r.tipo_documento, r.estado, r.created_at.strftime("%Y-%m-%d %H:%M:%S"), r.created_by.name if r.created_by else "", r.cliente or "", r.telefono or "", r.destino or "", r.placa_patente or "", r.conductor or "", r.pioneta or "", r.monto or 0, r.observacion or "", r.motivo_anulacion or ""])
+        ws.append([r.id, r.numero_documento, r.tipo_documento, r.estado, r.created_at.strftime("%Y-%m-%d %H:%M:%S"), r.created_by.name if r.created_by else "", r.placa_patente or "", r.monto or 0, r.observacion or "", r.motivo_anulacion or ""])
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
@@ -775,6 +790,280 @@ def cambiar_estado(dispatch_id):
     audit("CAMBIAR_ESTADO", f"Documento {despacho.numero_documento} a {nuevo_estado}")
     flash("Estado actualizado.", "success")
     return redirect(request.referrer or url_for("consultas"))
+
+
+def parse_date_optional(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def maintenance_filters():
+    today = chile_today()
+    start_date = parse_date(request.args.get("desde"), date(today.year, 1, 1))
+    end_date = parse_date(request.args.get("hasta"), today)
+    machine_id = request.args.get("machine_id", "").strip()
+    estado = request.args.get("estado", "").strip()
+    tipo = request.args.get("tipo", "").strip()
+    q = request.args.get("q", "").strip()
+
+    query = Maintenance.query.filter(Maintenance.fecha.between(start_date, end_date))
+
+    if machine_id:
+        try:
+            query = query.filter(Maintenance.machine_id == int(machine_id))
+        except ValueError:
+            machine_id = ""
+
+    if estado:
+        query = query.filter(Maintenance.estado == estado)
+
+    if tipo:
+        query = query.filter(Maintenance.tipo_mantencion == tipo)
+
+    if q:
+        like = f"%{q}%"
+        query = query.join(Machine).filter(
+            db.or_(
+                Machine.nombre.ilike(like),
+                Machine.patente_codigo.ilike(like),
+                Maintenance.detalle.ilike(like),
+                Maintenance.proveedor_taller.ilike(like),
+                Maintenance.responsable.ilike(like),
+            )
+        )
+
+    return query.order_by(Maintenance.fecha.desc(), Maintenance.created_at.desc()), start_date, end_date, machine_id, estado, tipo, q
+
+
+def maintenance_summary(registros):
+    total = len(registros)
+    costo_total = sum((m.costo or 0) for m in registros)
+    pendientes = sum(1 for m in registros if m.estado == "PENDIENTE")
+    realizadas = sum(1 for m in registros if m.estado == "REALIZADA")
+    programadas = sum(1 for m in registros if m.estado == "PROGRAMADA")
+    return total, costo_total, pendientes, realizadas, programadas
+
+
+def maintenance_table(registros):
+    rows = ""
+    for m in registros:
+        costo = f"${m.costo:,.0f}".replace(",", ".") if m.costo else ""
+        proxima = m.proxima_fecha.strftime("%Y-%m-%d") if m.proxima_fecha else ""
+        rows += f"""
+        <tr>
+          <td>{m.fecha.strftime("%Y-%m-%d")}</td>
+          <td><strong>{m.machine.nombre}</strong><br><small>{m.machine.tipo} · {m.machine.patente_codigo or ""}</small></td>
+          <td>{m.tipo_mantencion}</td>
+          <td><span class="status {m.estado}">{m.estado}</span></td>
+          <td>{m.kilometraje_horometro or ""}</td>
+          <td>{m.proveedor_taller or ""}</td>
+          <td>{m.responsable or ""}</td>
+          <td>{costo}</td>
+          <td>{m.detalle}</td>
+          <td>{proxima}<br><small>{m.proximo_km_horas or ""}</small></td>
+          <td>{m.created_by.name if m.created_by else ""}</td>
+        </tr>
+        """
+    if not rows:
+        rows = '<tr><td colspan="11" style="text-align:center;color:#64748b;padding:24px">Sin mantenciones para los filtros seleccionados.</td></tr>'
+    return f"""
+    <section class="card">
+      <h2>Historial de mantenciones</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Fecha</th><th>Maquinaria</th><th>Tipo</th><th>Estado</th><th>KM/Horómetro</th>
+              <th>Proveedor/Taller</th><th>Responsable</th><th>Costo</th><th>Detalle</th><th>Próxima</th><th>Usuario</th>
+            </tr>
+          </thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+    </section>
+    """
+
+
+@app.route("/mantenciones", methods=["GET", "POST"])
+@login_required
+def mantenciones():
+    if request.method == "POST":
+        machine_id = request.form.get("machine_id", "").strip()
+        fecha = parse_date_optional(request.form.get("fecha")) or chile_today()
+        detalle = request.form.get("detalle", "").strip()
+
+        if not machine_id or not detalle:
+            flash("Debes seleccionar maquinaria e ingresar el detalle de la mantención.", "warning")
+            return redirect(url_for("mantenciones"))
+
+        machine = db.session.get(Machine, int(machine_id))
+        if not machine:
+            flash("Maquinaria no encontrada.", "danger")
+            return redirect(url_for("mantenciones"))
+
+        mant = Maintenance(
+            machine_id=machine.id,
+            fecha=fecha,
+            tipo_mantencion=request.form.get("tipo_mantencion", "PREVENTIVA").strip(),
+            estado=request.form.get("estado", "REALIZADA").strip(),
+            kilometraje_horometro=request.form.get("kilometraje_horometro", "").strip(),
+            proveedor_taller=request.form.get("proveedor_taller", "").strip(),
+            responsable=request.form.get("responsable", "").strip(),
+            costo=parse_int(request.form.get("costo")),
+            detalle=detalle,
+            proxima_fecha=parse_date_optional(request.form.get("proxima_fecha")),
+            proximo_km_horas=request.form.get("proximo_km_horas", "").strip(),
+            created_by_id=session.get("user_id"),
+        )
+        db.session.add(mant)
+
+        nuevo_estado_maquina = request.form.get("estado_maquina", "").strip()
+        if nuevo_estado_maquina:
+            machine.estado = nuevo_estado_maquina
+
+        db.session.commit()
+        audit("CREAR_MANTENCION", f"{machine.nombre} - {mant.tipo_mantencion}")
+        flash("Mantención registrada correctamente.", "success")
+        return redirect(url_for("mantenciones"))
+
+    query, start_date, end_date, machine_id, estado, tipo, q = maintenance_filters()
+    registros = query.limit(1000).all()
+    total, costo_total, pendientes, realizadas, programadas = maintenance_summary(registros)
+    costo_txt = f"${costo_total:,.0f}".replace(",", ".")
+
+    machines = Machine.query.order_by(Machine.tipo.asc(), Machine.nombre.asc()).all()
+    machine_options = "".join(f'<option value="{m.id}">{m.nombre} · {m.tipo}</option>' for m in machines)
+
+    filter_machine_options = '<option value="">Todas</option>'
+    for m in machines:
+        selected = "selected" if str(m.id) == str(machine_id) else ""
+        filter_machine_options += f'<option value="{m.id}" {selected}>{m.nombre}</option>'
+
+    def sel_estado(v):
+        return "selected" if estado == v else ""
+
+    def sel_tipo(v):
+        return "selected" if tipo == v else ""
+
+    body = f"""
+    <h1>Mantenciones de maquinarias</h1>
+    <p class="muted">Control de mantenciones para camiones, grúas horquilla y equipos de bodega.</p>
+
+    <section class="summary">
+      <div class="card metric"><span>Registros</span><strong>{total}</strong></div>
+      <div class="card metric"><span>Realizadas</span><strong>{realizadas}</strong></div>
+      <div class="card metric"><span>Pendientes</span><strong>{pendientes}</strong></div>
+      <div class="card metric"><span>Programadas</span><strong>{programadas}</strong></div>
+      <div class="card metric"><span>Costo periodo</span><strong>{costo_txt}</strong></div>
+    </section>
+
+    <section class="card compact-form-card">
+      <h2>Registrar mantención</h2>
+      <form method="post" class="grid maintenance-grid">
+        <div><label>Maquinaria *</label><select name="machine_id" required>{machine_options}</select></div>
+        <div><label>Fecha</label><input type="date" name="fecha" value="{chile_today()}"></div>
+        <div><label>Tipo mantención</label><select name="tipo_mantencion"><option value="PREVENTIVA">PREVENTIVA</option><option value="CORRECTIVA">CORRECTIVA</option><option value="REVISIÓN">REVISIÓN</option><option value="CAMBIO ACEITE/FILTROS">CAMBIO ACEITE/FILTROS</option><option value="NEUMÁTICOS">NEUMÁTICOS</option><option value="FRENOS">FRENOS</option><option value="ELÉCTRICA">ELÉCTRICA</option><option value="OTRA">OTRA</option></select></div>
+        <div><label>Estado mantención</label><select name="estado"><option value="REALIZADA">REALIZADA</option><option value="PENDIENTE">PENDIENTE</option><option value="PROGRAMADA">PROGRAMADA</option><option value="OBSERVADA">OBSERVADA</option></select></div>
+        <div><label>KM / Horómetro</label><input name="kilometraje_horometro" placeholder="Ej: 120.000 km / 2.300 h"></div>
+        <div><label>Proveedor / Taller</label><input name="proveedor_taller" placeholder="Taller, mecánico, proveedor"></div>
+        <div><label>Responsable</label><input name="responsable" placeholder="Quién coordina o revisa"></div>
+        <div><label>Costo</label><input name="costo" placeholder="Ej: 85000"></div>
+        <div><label>Próxima fecha</label><input type="date" name="proxima_fecha"></div>
+        <div><label>Próximo KM/Horas</label><input name="proximo_km_horas" placeholder="Ej: 130.000 km / 2.500 h"></div>
+        <div><label>Estado maquinaria</label><select name="estado_maquina"><option value="">No cambiar</option><option value="OPERATIVA">OPERATIVA</option><option value="EN MANTENCIÓN">EN MANTENCIÓN</option><option value="FUERA DE SERVICIO">FUERA DE SERVICIO</option></select></div>
+        <div class="obs-inline"><label>Detalle *</label><input name="detalle" required placeholder="Trabajo realizado, repuestos, falla detectada, recomendación, etc."></div>
+        <button class="btn primary full compact-save" type="submit">Guardar mantención</button>
+      </form>
+    </section>
+
+    <form class="card filters" method="get">
+      <div><label>Desde</label><input type="date" name="desde" value="{start_date}"></div>
+      <div><label>Hasta</label><input type="date" name="hasta" value="{end_date}"></div>
+      <div><label>Maquinaria</label><select name="machine_id">{filter_machine_options}</select></div>
+      <div><label>Estado</label><select name="estado"><option value="">Todos</option><option value="REALIZADA" {sel_estado("REALIZADA")}>Realizada</option><option value="PENDIENTE" {sel_estado("PENDIENTE")}>Pendiente</option><option value="PROGRAMADA" {sel_estado("PROGRAMADA")}>Programada</option><option value="OBSERVADA" {sel_estado("OBSERVADA")}>Observada</option></select></div>
+      <div><label>Tipo</label><select name="tipo"><option value="">Todos</option><option value="PREVENTIVA" {sel_tipo("PREVENTIVA")}>Preventiva</option><option value="CORRECTIVA" {sel_tipo("CORRECTIVA")}>Correctiva</option><option value="REVISIÓN" {sel_tipo("REVISIÓN")}>Revisión</option><option value="CAMBIO ACEITE/FILTROS" {sel_tipo("CAMBIO ACEITE/FILTROS")}>Aceite/Filtros</option><option value="NEUMÁTICOS" {sel_tipo("NEUMÁTICOS")}>Neumáticos</option><option value="FRENOS" {sel_tipo("FRENOS")}>Frenos</option><option value="ELÉCTRICA" {sel_tipo("ELÉCTRICA")}>Eléctrica</option><option value="OTRA" {sel_tipo("OTRA")}>Otra</option></select></div>
+      <div class="grow"><label>Buscar</label><input name="q" value="{q}" placeholder="Maquinaria, taller, responsable, detalle..."></div>
+      <button class="btn" type="submit">Filtrar</button>
+    </form>
+
+    {maintenance_table(registros)}
+    """
+    return page("Mantenciones", body)
+
+
+@app.route("/maquinarias", methods=["GET", "POST"])
+@login_required
+@roles_required("ADMIN", "SUPERVISOR")
+def maquinarias():
+    if request.method == "POST":
+        nombre = request.form.get("nombre", "").strip()
+        tipo = request.form.get("tipo", "CAMIÓN").strip()
+        if not nombre:
+            flash("El nombre de la maquinaria es obligatorio.", "warning")
+            return redirect(url_for("maquinarias"))
+
+        machine = Machine(
+            nombre=nombre,
+            tipo=tipo,
+            patente_codigo=request.form.get("patente_codigo", "").strip().upper(),
+            sucursal=request.form.get("sucursal", "").strip(),
+            marca_modelo=request.form.get("marca_modelo", "").strip(),
+            estado=request.form.get("estado", "OPERATIVA").strip(),
+            observacion=request.form.get("observacion", "").strip(),
+        )
+        db.session.add(machine)
+        db.session.commit()
+        audit("CREAR_MAQUINARIA", nombre)
+        flash("Maquinaria agregada correctamente.", "success")
+        return redirect(url_for("maquinarias"))
+
+    machines = Machine.query.order_by(Machine.tipo.asc(), Machine.nombre.asc()).all()
+    rows = ""
+    for m in machines:
+        rows += f"""
+        <tr>
+          <td><strong>{m.nombre}</strong></td>
+          <td>{m.tipo}</td>
+          <td>{m.patente_codigo or ""}</td>
+          <td>{m.sucursal or ""}</td>
+          <td>{m.marca_modelo or ""}</td>
+          <td><span class="status {m.estado}">{m.estado}</span></td>
+          <td>{m.observacion or ""}</td>
+        </tr>
+        """
+    body = f"""
+    <h1>Maquinarias</h1>
+    <p class="muted">Maestro de equipos disponibles para control de mantenciones.</p>
+
+    <section class="card compact-form-card">
+      <h2>Agregar maquinaria</h2>
+      <form method="post" class="grid">
+        <div><label>Nombre *</label><input name="nombre" required placeholder="Ej: Camión KIA KJ HY 12"></div>
+        <div><label>Tipo</label><select name="tipo"><option value="CAMIÓN">CAMIÓN</option><option value="GRÚA HORQUILLA">GRÚA HORQUILLA</option><option value="CAMIONETA">CAMIONETA</option><option value="OTRA">OTRA</option></select></div>
+        <div><label>Patente / Código</label><input name="patente_codigo" placeholder="Ej: KJ HY 12"></div>
+        <div><label>Sucursal</label><input name="sucursal" placeholder="Ej: Sucursal 1"></div>
+        <div><label>Marca / Modelo</label><input name="marca_modelo" placeholder="Ej: KIA / Hangcha"></div>
+        <div><label>Estado</label><select name="estado"><option value="OPERATIVA">OPERATIVA</option><option value="EN MANTENCIÓN">EN MANTENCIÓN</option><option value="FUERA DE SERVICIO">FUERA DE SERVICIO</option></select></div>
+        <div class="obs-inline"><label>Observación</label><input name="observacion" placeholder="Dato relevante, ubicación, condición, etc."></div>
+        <button class="btn primary full compact-save" type="submit">Agregar maquinaria</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Maquinarias registradas</h2>
+      <div class="table-wrap">
+        <table class="simple-table">
+          <thead><tr><th>Nombre</th><th>Tipo</th><th>Patente/Código</th><th>Sucursal</th><th>Marca/Modelo</th><th>Estado</th><th>Observación</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+    </section>
+    """
+    return page("Maquinarias", body)
 
 
 @app.route("/users", methods=["GET", "POST"])
