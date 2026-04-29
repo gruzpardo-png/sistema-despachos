@@ -17,7 +17,7 @@ from openpyxl import Workbook
 
 
 APP_NAME = "Ferretería Cloud Tool"
-APP_VERSION = "v4.2 Data Safe"
+APP_VERSION = "v4.3 Modern Login"
 DB_PATH = os.environ.get("DATABASE_PATH", "ferreteria_cloud_tool.db")
 SECRET_KEY = os.environ.get("SECRET_KEY", "cambiar-esta-clave-en-render")
 
@@ -582,15 +582,49 @@ BASE_TEMPLATE = r"""
             align-items:center;
             justify-content:center;
             padding:24px;
-            background:linear-gradient(135deg,#0f766e,#172554);
+            background:
+                radial-gradient(circle at top left, rgba(45,212,191,.18), transparent 26%),
+                radial-gradient(circle at bottom right, rgba(59,130,246,.18), transparent 28%),
+                linear-gradient(135deg,#081522 0%, #0c2433 45%, #0c4a5a 100%);
+            position:relative;
+            overflow:hidden;
+        }
+        .login-bg::before{
+            content:"";
+            position:absolute;
+            inset:0;
+            background:
+                linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+            background-size:32px 32px;
+            mask-image:linear-gradient(to bottom, rgba(0,0,0,.65), transparent 95%);
+            pointer-events:none;
         }
         .login-card{
             width:100%;
-            max-width:430px;
-            background:white;
-            border-radius:24px;
-            padding:30px;
-            box-shadow:var(--shadow);
+            max-width:460px;
+            background:rgba(8,18,30,.82);
+            border:1px solid rgba(148,163,184,.28);
+            border-radius:28px;
+            padding:34px 30px 24px;
+            box-shadow:0 24px 70px rgba(2,6,23,.45);
+            backdrop-filter: blur(18px);
+            position:relative;
+            z-index:1;
+        }
+        .login-card::before{
+            content:"";
+            position:absolute;
+            inset:0;
+            border-radius:28px;
+            padding:1px;
+            background:linear-gradient(135deg, rgba(45,212,191,.55), rgba(96,165,250,.45), rgba(255,255,255,.12));
+            -webkit-mask:
+              linear-gradient(#fff 0 0) content-box,
+              linear-gradient(#fff 0 0);
+            -webkit-mask-composite:xor;
+            mask-composite:exclude;
+            pointer-events:none;
         }
         .topbar{
             background:#0f172a;
@@ -698,6 +732,7 @@ BASE_TEMPLATE = r"""
             font-weight:700;
             margin-bottom:6px;
             color:#374151;
+            letter-spacing:.01em;
         }
         input,select,textarea{
             width:100%;
@@ -707,6 +742,12 @@ BASE_TEMPLATE = r"""
             font-size:14px;
             background:white;
             color:#111827;
+            transition:border-color .18s ease, box-shadow .18s ease, background .18s ease;
+        }
+        input:focus,select:focus,textarea:focus{
+            outline:none;
+            border-color:#14b8a6;
+            box-shadow:0 0 0 4px rgba(20,184,166,.12);
         }
         textarea{min-height:96px;resize:vertical}
         .form-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}
@@ -943,8 +984,7 @@ def login():
     return render_page("Ingreso", r"""
     <div class="login-bg">
         <div class="login-card">
-            <h1 style="margin:0 0 6px;">Ferretería Cloud Tool</h1>
-            <p class="muted" style="margin-top:0;">Sistema interno de despachos, mantenciones, auditoría y administración.</p>
+            <h1 style="margin:0 0 22px;color:#f8fafc;font-size:34px;line-height:1.05;letter-spacing:-0.03em;">Ferretería Cloud Tool</h1>
 
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
@@ -955,22 +995,35 @@ def login():
             {% endwith %}
 
             <form method="post">
-                <div style="margin-bottom:12px;">
-                    <label>Usuario</label>
-                    <input name="username" autocomplete="username" required>
+                <div style="margin-bottom:14px;">
+                    <label style="color:#cbd5e1;font-size:12px;text-transform:uppercase;letter-spacing:.08em;">Usuario</label>
+                    <input
+                        name="username"
+                        autocomplete="username"
+                        required
+                        style="height:52px;background:rgba(255,255,255,.06);border:1px solid rgba(148,163,184,.28);color:#f8fafc;border-radius:16px;padding:0 16px;"
+                    >
                 </div>
-                <div style="margin-bottom:12px;">
-                    <label>Contraseña</label>
-                    <input type="password" name="password" autocomplete="current-password" required>
+                <div style="margin-bottom:16px;">
+                    <label style="color:#cbd5e1;font-size:12px;text-transform:uppercase;letter-spacing:.08em;">Contraseña</label>
+                    <input
+                        type="password"
+                        name="password"
+                        autocomplete="current-password"
+                        required
+                        style="height:52px;background:rgba(255,255,255,.06);border:1px solid rgba(148,163,184,.28);color:#f8fafc;border-radius:16px;padding:0 16px;"
+                    >
                 </div>
-                <button class="btn btn-primary" style="width:100%;justify-content:center;">Ingresar</button>
+                <button
+                    class="btn"
+                    style="width:100%;justify-content:center;height:54px;border-radius:16px;background:linear-gradient(135deg,#14b8a6,#2563eb);color:white;font-size:16px;font-weight:800;box-shadow:0 12px 28px rgba(37,99,235,.28);"
+                >
+                    Ingresar
+                </button>
             </form>
 
-            <div class="placeholder" style="margin-top:16px;">
-                <strong>Primer ingreso</strong><br>
-                Admin: <b>admin</b> / <b>admin123</b><br>
-                Operador: <b>operador</b> / <b>operador123</b><br>
-                Cambia estas claves desde Administración &gt; Usuarios.
+            <div style="margin-top:18px;text-align:center;color:rgba(226,232,240,.72);font-size:12px;letter-spacing:.12em;text-transform:uppercase;">
+                RUZ AI Systems
             </div>
         </div>
     </div>
