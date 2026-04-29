@@ -195,7 +195,166 @@ def summary_for(query):
 
 STYLE = """
 <style>
-*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#f4f7fb;color:#0f172a}.topbar{background:white;border-bottom:1px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center;padding:16px 26px;position:sticky;top:0;z-index:5}.brand{display:flex;align-items:center;gap:14px}.logo{height:44px;max-width:180px;object-fit:contain}.brand-title{font-size:18px;font-weight:800}.brand-sub{font-size:13px;color:#64748b}.nav{display:flex;gap:14px;align-items:center;flex-wrap:wrap}.nav a{text-decoration:none;font-weight:800;color:#0f172a}.nav .exit{color:#dc2626}.pill{background:#ecfdf5;color:#047857;border:1px solid #86efac;border-radius:999px;padding:8px 12px;font-size:12px;font-weight:800}.container{max-width:1500px;margin:auto;padding:28px}.card{background:white;border:1px solid #e2e8f0;border-radius:18px;padding:22px;margin-bottom:20px;box-shadow:0 16px 35px rgba(15,23,42,.06)}h1{font-size:34px;margin:0 0 6px}.muted{color:#64748b}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:15px}.full{grid-column:1/-1}label{font-weight:800;font-size:14px;display:block;margin-bottom:7px}input,select,textarea{width:100%;border:1px solid #cbd5e1;border-radius:12px;padding:13px;font:inherit;background:white}.btn,button{border:0;border-radius:12px;padding:13px 17px;font-weight:800;cursor:pointer;background:#e2e8f0;text-decoration:none;color:#0f172a}.primary{background:#0f766e!important;color:white!important}.danger-btn{background:#fee2e2;color:#991b1b}.summary{display:grid;grid-template-columns:repeat(5,1fr);gap:14px}.metric span{display:block;text-transform:uppercase;color:#64748b;font-size:12px;font-weight:800}.metric strong{font-size:30px}.filters{display:flex;gap:12px;align-items:end;flex-wrap:wrap}.filters div{min-width:150px}.filters .grow{flex:1}.table-wrap{overflow:auto;max-height:650px}table{border-collapse:collapse;width:100%;min-width:1300px}th,td{border-bottom:1px solid #e5e7eb;padding:10px;text-align:left;font-size:13px;vertical-align:top}th{background:#f8fafc;position:sticky;top:0}.status{border-radius:999px;padding:5px 9px;font-size:11px;font-weight:900}.ENTREGADO_RETIRADO{background:#dcfce7;color:#166534}.PENDIENTE{background:#fef9c3;color:#854d0e}.ANULADO{background:#fee2e2;color:#991b1b}.alert{padding:12px 14px;border-radius:12px;margin-bottom:10px;font-weight:700}.alert-success{background:#dcfce7;color:#166534}.alert-danger{background:#fee2e2;color:#991b1b}.alert-warning{background:#fef9c3;color:#854d0e}.login{min-height:calc(100vh - 90px);display:flex;justify-content:center;align-items:center}.login-card{max-width:430px;width:100%;text-align:left}.hint{background:#f8fafc;border-radius:12px;padding:12px;font-size:13px;margin-top:14px}.rowline{display:flex;justify-content:space-between;border-bottom:1px solid #e5e7eb;padding:10px 0}@media(max-width:900px){.topbar{flex-direction:column;align-items:flex-start}.grid,.summary{grid-template-columns:1fr}.container{padding:16px}}
+*{box-sizing:border-box}
+body{
+  margin:0;
+  font-family:Arial,sans-serif;
+  background:#f4f7fb;
+  color:#0f172a;
+  font-size:14px;
+}
+.topbar{
+  background:white;
+  border-bottom:1px solid #e5e7eb;
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  padding:10px 22px;
+  position:sticky;
+  top:0;
+  z-index:5;
+  min-height:58px;
+}
+.brand{display:flex;align-items:center;gap:10px}
+.logo{height:34px;max-width:150px;object-fit:contain}
+.brand-title{font-size:16px;font-weight:800}
+.brand-sub{font-size:12px;color:#64748b}
+.nav{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.nav a{text-decoration:none;font-weight:800;color:#0f172a;font-size:14px}
+.nav .exit{color:#dc2626}
+.pill{
+  background:#ecfdf5;
+  color:#047857;
+  border:1px solid #86efac;
+  border-radius:999px;
+  padding:6px 10px;
+  font-size:12px;
+  font-weight:800;
+}
+.container{
+  max-width:1540px;
+  margin:auto;
+  padding:18px 24px;
+}
+.card{
+  background:white;
+  border:1px solid #e2e8f0;
+  border-radius:16px;
+  padding:16px 18px;
+  margin-bottom:14px;
+  box-shadow:0 10px 24px rgba(15,23,42,.045);
+}
+h1{
+  font-size:28px;
+  margin:0 0 5px;
+  line-height:1.1;
+}
+h2{
+  font-size:21px;
+  margin:0 0 14px;
+  line-height:1.15;
+}
+.muted{color:#64748b;margin:4px 0 14px}
+.grid{
+  display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:10px 14px;
+}
+.full{grid-column:1/-1}
+label{
+  font-weight:800;
+  font-size:13px;
+  display:block;
+  margin-bottom:5px;
+}
+input,select,textarea{
+  width:100%;
+  border:1px solid #cbd5e1;
+  border-radius:10px;
+  padding:9px 11px;
+  font:inherit;
+  background:white;
+  min-height:40px;
+}
+textarea{
+  min-height:48px;
+  resize:vertical;
+}
+.btn,button{
+  border:0;
+  border-radius:10px;
+  padding:10px 15px;
+  font-weight:800;
+  cursor:pointer;
+  background:#e2e8f0;
+  text-decoration:none;
+  color:#0f172a;
+  min-height:38px;
+}
+.primary{background:#0f766e!important;color:white!important}
+.danger-btn{background:#fee2e2;color:#991b1b}
+.summary{
+  display:grid;
+  grid-template-columns:repeat(5,1fr);
+  gap:12px;
+}
+.metric{
+  padding:13px 15px;
+}
+.metric span{
+  display:block;
+  text-transform:uppercase;
+  color:#64748b;
+  font-size:11px;
+  font-weight:800;
+}
+.metric strong{
+  font-size:24px;
+  line-height:1.05;
+}
+.filters{
+  display:flex;
+  gap:10px;
+  align-items:end;
+  flex-wrap:wrap;
+}
+.filters div{min-width:135px}
+.filters .grow{flex:1}
+.table-wrap{overflow:auto;max-height:650px}
+table{border-collapse:collapse;width:100%;min-width:1300px}
+th,td{
+  border-bottom:1px solid #e5e7eb;
+  padding:8px;
+  text-align:left;
+  font-size:12px;
+  vertical-align:top;
+}
+th{background:#f8fafc;position:sticky;top:0}
+.status{border-radius:999px;padding:4px 8px;font-size:10px;font-weight:900}
+.ENTREGADO_RETIRADO{background:#dcfce7;color:#166534}
+.PENDIENTE{background:#fef9c3;color:#854d0e}
+.ANULADO{background:#fee2e2;color:#991b1b}
+.alert{padding:10px 12px;border-radius:10px;margin-bottom:8px;font-weight:700}
+.alert-success{background:#dcfce7;color:#166534}
+.alert-danger{background:#fee2e2;color:#991b1b}
+.alert-warning{background:#fef9c3;color:#854d0e}
+.login{min-height:calc(100vh - 90px);display:flex;justify-content:center;align-items:center}
+.login-card{max-width:410px;width:100%;text-align:left}
+.hint{background:#f8fafc;border-radius:10px;padding:10px;font-size:12px;margin-top:12px}
+.rowline{display:flex;justify-content:space-between;border-bottom:1px solid #e5e7eb;padding:8px 0}
+.compact-form-card{padding:14px 18px 16px}
+.compact-form-card h2{margin-bottom:12px}
+.compact-save{
+  margin-top:2px;
+  height:40px;
+  min-height:40px;
+  padding:9px 14px;
+}
+@media(max-width:900px){
+  .topbar{flex-direction:column;align-items:flex-start}
+  .grid,.summary{grid-template-columns:1fr}
+  .container{padding:14px}
+}
 </style>
 """
 
@@ -439,7 +598,7 @@ def despachos():
 
     form = """
     <div><h1>Nuevo registro</h1><p class="muted">Formulario rápido para registrar documentos entregados, retirados o pendientes.</p></div>
-    <section class="card">
+    <section class="card compact-form-card">
       <h2>Registrar documento</h2>
       <form method="post" class="grid">
         <div><label>Número documento *</label><input name="numero_documento" required placeholder="Ej: 123456"></div>
@@ -452,8 +611,8 @@ def despachos():
         <div><label>Patente</label><input name="placa_patente"></div>
         <div><label>Conductor</label><input name="conductor" placeholder="Solo despacho interno"></div>
         <div><label>Pioneta</label><input name="pioneta" placeholder="Solo despacho interno"></div>
-        <div class="full"><label>Observación</label><textarea name="observacion" rows="3" placeholder="Quién retira, condición especial, autorización, etc."></textarea></div>
-        <button class="btn primary full" type="submit">Guardar registro</button>
+        <div class="full"><label>Observación</label><textarea name="observacion" rows="2" placeholder="Quién retira, condición especial, autorización, etc."></textarea></div>
+        <button class="btn primary full compact-save" type="submit">Guardar registro</button>
       </form>
     </section>
     """
