@@ -1,12 +1,6 @@
-# Ejecutar dentro de la carpeta local del repositorio sistema-despachos
-# 1) Copia primero todos los archivos de este parche encima del repo.
-# 2) Luego ejecuta estos comandos:
-
-git status
-git add app.py requirements.txt render.yaml README.md .gitignore static templates
-git commit -m "Corregir estructura app Flask para Render"
-git push origin main
-
-# Verificación local opcional antes del push:
-# python -m py_compile app.py
-# python app.py
+services:
+  - type: web
+    name: despachos-app
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app

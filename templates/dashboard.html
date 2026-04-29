@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-title">
+  <h1>Dashboard</h1>
+  <p>Resumen operativo del periodo seleccionado.</p>
+</div>
+
+{% include "_filters.html" %}
+{% include "_summary.html" %}
+
+<section class="dashboard-grid">
+  <article class="card">
+    <h2>Por usuario</h2>
+    {% for name, total in by_user.items() %}
+      <div class="rowline"><span>{{ name }}</span><strong>{{ total }}</strong></div>
+    {% else %}
+      <p class="muted">Sin datos.</p>
+    {% endfor %}
+  </article>
+
+  <article class="card">
+    <h2>Por estado</h2>
+    {% for name, total in by_estado.items() %}
+      <div class="rowline"><span>{{ name.replace("_", " / ") }}</span><strong>{{ total }}</strong></div>
+    {% else %}
+      <p class="muted">Sin datos.</p>
+    {% endfor %}
+  </article>
+</section>
+
+{% set table_title = "Últimos movimientos del periodo" %}
+{% include "_table.html" %}
+{% endblock %}

@@ -1,0 +1,18 @@
+PARCHE PARA ERROR 500 EN /login
+
+Tu deploy ya levantó correctamente en Render, pero /login está tirando Internal Server Error.
+Este parche reemplaza templates y static por versiones compatibles con el app.py corregido.
+
+Copia estas carpetas en la raíz del repo:
+- templates/
+- static/
+- app.py si quieres dejar todo consistente
+- requirements.txt si quieres asegurar dependencias
+
+Luego:
+git add .
+git commit -m "Corregir templates para login y panel"
+git push origin main
+
+En Render:
+Manual Deploy -> Deploy latest commit

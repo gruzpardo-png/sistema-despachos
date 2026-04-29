@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-title">
+  <h1>Nuevo registro</h1>
+  <p>Formulario rápido para registrar documentos entregados, retirados o pendientes.</p>
+</div>
+
+<section class="card">
+  <div class="section-title">
+    <h2>Registrar documento</h2>
+    <span class="pill">Usuario: {{ current_user.username }}</span>
+  </div>
+
+  <form method="post" class="grid-form">
+    <div>
+      <label>Número documento *</label>
+      <input name="numero_documento" required placeholder="Ej: 123456">
+    </div>
+
+    <div>
+      <label>Tipo documento *</label>
+      <select name="tipo_documento" required>
+        <option value="BOLETA">BOLETA</option>
+        <option value="FACTURA">FACTURA</option>
+        <option value="GUÍA">GUÍA</option>
+      </select>
+    </div>
+
+    <div>
+      <label>Estado inicial *</label>
+      <select name="estado" required>
+        <option value="ENTREGADO_RETIRADO">ENTREGADO / RETIRADO</option>
+        <option value="PENDIENTE">PENDIENTE</option>
+      </select>
+    </div>
+
+    <div>
+      <label>Monto documento</label>
+      <input name="monto" inputmode="numeric" placeholder="Ej: 125000">
+    </div>
+
+    <div>
+      <label>Cliente</label>
+      <input name="cliente" placeholder="Cliente o empresa">
+    </div>
+
+    <div>
+      <label>Teléfono</label>
+      <input name="telefono">
+    </div>
+
+    <div>
+      <label>Destino</label>
+      <input name="destino" placeholder="Comuna / referencia">
+    </div>
+
+    <div>
+      <label>Patente</label>
+      <input name="placa_patente">
+    </div>
+
+    <div>
+      <label>Conductor</label>
+      <input name="conductor" placeholder="Solo despacho interno">
+    </div>
+
+    <div>
+      <label>Pioneta</label>
+      <input name="pioneta" placeholder="Solo despacho interno">
+    </div>
+
+    <div class="full">
+      <label>Observación</label>
+      <textarea name="observacion" rows="3" placeholder="Quién retira, condición especial, autorización, etc."></textarea>
+    </div>
+
+    <button class="btn primary full" type="submit">Guardar registro</button>
+  </form>
+</section>
+
+{% include "_summary.html" %}
+{% include "_filters.html" %}
+{% set table_title = "Registros recientes" %}
+{% include "_table.html" %}
+{% endblock %}

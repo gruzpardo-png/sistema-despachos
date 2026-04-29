@@ -1,0 +1,22 @@
+<section class="summary-grid">
+  <article class="card metric">
+    <span>Registros</span>
+    <strong>{{ resumen.total }}</strong>
+  </article>
+  <article class="card metric">
+    <span>Pendientes</span>
+    <strong>{{ resumen.pendientes }}</strong>
+  </article>
+  <article class="card metric">
+    <span>Entregados / retirados</span>
+    <strong>{{ resumen.entregados }}</strong>
+  </article>
+  <article class="card metric danger">
+    <span>Anulados</span>
+    <strong>{{ resumen.anulados }}</strong>
+  </article>
+  <article class="card metric wide">
+    <span>Monto total no anulado</span>
+    <strong>${{ "{:,.0f}".format(resumen.monto_total).replace(",", ".") }}</strong>
+  </article>
+</section>

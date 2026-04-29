@@ -1,0 +1,68 @@
+<section class="card table-card">
+  <div class="table-head">
+    <h2>{{ table_title or "Registros" }}</h2>
+    <span>{{ registros|length }} resultados visibles</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Fecha</th>
+          <th>Documento</th>
+          <th>Tipo</th>
+          <th>Estado</th>
+          <th>Monto</th>
+          <th>Cliente</th>
+          <th>Teléfono</th>
+          <th>Destino</th>
+          <th>Patente</th>
+          <th>Conductor</th>
+          <th>Pioneta</th>
+          <th>Usuario</th>
+          <th>Observación</th>
+          <th>Acción</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for r in registros %}
+        <tr>
+          <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          <td><strong>{{ r.numero_documento }}</strong></td>
+          <td>{{ r.tipo_documento }}</td>
+          <td><span class="status status-{{ r.estado|lower }}">{{ r.estado.replace("_", " / ") }}</span></td>
+          <td>{% if r.monto %}${{ "{:,.0f}".format(r.monto).replace(",", ".") }}{% endif %}</td>
+          <td>{{ r.cliente or "" }}</td>
+          <td>{{ r.telefono or "" }}</td>
+          <td>{{ r.destino or "" }}</td>
+          <td>{{ r.placa_patente or "" }}</td>
+          <td>{{ r.conductor or "" }}</td>
+          <td>{{ r.pioneta or "" }}</td>
+          <td>{{ r.created_by.name if r.created_by else "" }}</td>
+          <td>{{ r.observacion or "" }}</td>
+          <td class="actions">
+            {% if r.estado != 'ANULADO' %}
+              <form method="post" action="{{ url_for('cambiar_estado', dispatch_id=r.id) }}">
+                <select name="estado">
+                  <option value="ENTREGADO_RETIRADO">Entregado</option>
+                  <option value="PENDIENTE">Pendiente</option>
+                </select>
+                <button class="small" type="submit">Cambiar</button>
+              </form>
+              {% if current_user.role in ['ADMIN','SUPERVISOR'] %}
+              <form method="post" action="{{ url_for('anular', dispatch_id=r.id) }}" onsubmit="return pedirMotivo(this);">
+                <input type="hidden" name="motivo_anulacion">
+                <button class="small danger-btn" type="submit">Anular</button>
+              </form>
+              {% endif %}
+            {% else %}
+              <small>{{ r.motivo_anulacion }}</small>
+            {% endif %}
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="14" class="empty">No hay registros para los filtros seleccionados.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>

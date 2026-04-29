@@ -1,0 +1,25 @@
+<form method="get" class="filters card">
+  <div>
+    <label>Desde</label>
+    <input type="date" name="desde" value="{{ desde }}">
+  </div>
+  <div>
+    <label>Hasta</label>
+    <input type="date" name="hasta" value="{{ hasta }}">
+  </div>
+  <div>
+    <label>Estado</label>
+    <select name="estado">
+      <option value="">Todos</option>
+      <option value="ENTREGADO_RETIRADO" {% if estado == 'ENTREGADO_RETIRADO' %}selected{% endif %}>Entregado / Retirado</option>
+      <option value="PENDIENTE" {% if estado == 'PENDIENTE' %}selected{% endif %}>Pendiente</option>
+      <option value="ANULADO" {% if estado == 'ANULADO' %}selected{% endif %}>Anulado</option>
+    </select>
+  </div>
+  <div class="grow">
+    <label>Buscar</label>
+    <input name="q" value="{{ q }}" placeholder="Documento, cliente, patente, destino...">
+  </div>
+  <button class="btn" type="submit">Filtrar</button>
+  <a class="btn secondary" href="{{ url_for('exportar', desde=desde, hasta=hasta, estado=estado, q=q) }}">Exportar Excel</a>
+</form>

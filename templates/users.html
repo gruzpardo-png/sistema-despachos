@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-title">
+  <h1>Usuarios</h1>
+  <p>Administración de usuarios internos.</p>
+</div>
+
+<section class="card">
+  <h2>Crear usuario</h2>
+  <form method="post" class="grid-form">
+    <div>
+      <label>Usuario</label>
+      <input name="username" required>
+    </div>
+    <div>
+      <label>Nombre</label>
+      <input name="name" required>
+    </div>
+    <div>
+      <label>Rol</label>
+      <select name="role">
+        <option value="ADMIN">ADMIN</option>
+        <option value="SUPERVISOR">SUPERVISOR</option>
+        <option value="OPERADOR">OPERADOR</option>
+        <option value="LECTURA">LECTURA</option>
+      </select>
+    </div>
+    <div>
+      <label>Clave</label>
+      <input type="password" name="password" required>
+    </div>
+    <button class="btn primary full" type="submit">Crear usuario</button>
+  </form>
+</section>
+
+<section class="card table-card">
+  <h2>Usuarios registrados</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Usuario</th><th>Nombre</th><th>Rol</th><th>Activo</th><th>Creado</th></tr></thead>
+      <tbody>
+      {% for u in usuarios %}
+        <tr>
+          <td>{{ u.username }}</td>
+          <td>{{ u.name }}</td>
+          <td>{{ u.role }}</td>
+          <td>{{ "Sí" if u.active else "No" }}</td>
+          <td>{{ u.created_at.strftime("%Y-%m-%d") }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
