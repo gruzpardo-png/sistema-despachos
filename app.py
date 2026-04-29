@@ -147,6 +147,7 @@ def build_query():
     start_date = parse_date(request.args.get("desde"), today)
     end_date = parse_date(request.args.get("hasta"), today)
     estado = request.args.get("estado", "").strip()
+    usuario_id = request.args.get("usuario_id", "").strip()
     q = request.args.get("q", "").strip()
 
     start_dt = datetime.combine(start_date, time.min)
@@ -156,6 +157,12 @@ def build_query():
 
     if estado:
         query = query.filter(Dispatch.estado == estado)
+
+    if usuario_id:
+        try:
+            query = query.filter(Dispatch.created_by_id == int(usuario_id))
+        except ValueError:
+            usuario_id = ""
 
     if q:
         like = f"%{q}%"
@@ -172,7 +179,7 @@ def build_query():
             )
         )
 
-    return query.order_by(Dispatch.created_at.desc()), start_date, end_date, estado, q
+    return query.order_by(Dispatch.created_at.desc()), start_date, end_date, estado, usuario_id, q
 
 
 def summary_for(query):
@@ -253,9 +260,16 @@ def summary_html(resumen):
     """
 
 
-def filters_html(desde, hasta, estado, q):
+def filters_html(desde, hasta, estado, usuario_id, q):
     def sel(v):
         return "selected" if estado == v else ""
+
+    usuarios = User.query.filter_by(active=True).order_by(User.name.asc()).all()
+    user_options = '<option value="">Todos</option>'
+    for u in usuarios:
+        selected = "selected" if str(u.id) == str(usuario_id) else ""
+        user_options += f'<option value="{u.id}" {selected}>{u.name} ({u.username})</option>'
+
     return f"""
     <form class="card filters" method="get">
       <div><label>Desde</label><input type="date" name="desde" value="{desde}"></div>
@@ -266,9 +280,10 @@ def filters_html(desde, hasta, estado, q):
         <option value="PENDIENTE" {sel("PENDIENTE")}>Pendiente</option>
         <option value="ANULADO" {sel("ANULADO")}>Anulado</option>
       </select></div>
+      <div><label>Usuario</label><select name="usuario_id">{user_options}</select></div>
       <div class="grow"><label>Buscar</label><input name="q" value="{q}" placeholder="Documento, cliente, patente..."></div>
       <button class="btn" type="submit">Filtrar</button>
-      <a class="btn primary" href="{url_for('exportar', desde=desde, hasta=hasta, estado=estado, q=q)}">Exportar Excel</a>
+      <a class="btn primary" href="{url_for('exportar', desde=desde, hasta=hasta, estado=estado, usuario_id=usuario_id, q=q)}">Exportar Excel</a>
     </form>
     """
 
@@ -418,7 +433,7 @@ def despachos():
         flash("Registro guardado correctamente.", "success")
         return redirect(url_for("despachos"))
 
-    query, start_date, end_date, estado, q = build_query()
+    query, start_date, end_date, estado, usuario_id, q = build_query()
     registros = query.limit(300).all()
     resumen = summary_for(query)
 
@@ -442,34 +457,73 @@ def despachos():
       </form>
     </section>
     """
-    body = form + summary_html(resumen) + filters_html(start_date, end_date, estado, q) + table_html(registros, "Registros recientes")
+    body = form + summary_html(resumen) + filters_html(start_date, end_date, estado, usuario_id, q) + table_html(registros, "Registros recientes")
     return page("Despachos", body)
 
 
 @app.route("/dashboard")
 @login_required
 def dashboard():
-    query, start_date, end_date, estado, q = build_query()
-    registros = query.limit(500).all()
+    query, start_date, end_date, estado, usuario_id, q = build_query()
+    registros = query.limit(1000).all()
     resumen = summary_for(query)
+
     by_user = {}
     by_estado = {}
     for r in registros:
         uname = r.created_by.name if r.created_by else "Sin usuario"
-        by_user[uname] = by_user.get(uname, 0) + 1
+        if uname not in by_user:
+            by_user[uname] = {"documentos": 0, "monto": 0}
+        by_user[uname]["documentos"] += 1
+        if r.estado != "ANULADO":
+            by_user[uname]["monto"] += r.monto or 0
+
         by_estado[r.estado] = by_estado.get(r.estado, 0) + 1
 
-    user_lines = "".join(f'<div class="rowline"><span>{k}</span><strong>{v}</strong></div>' for k, v in by_user.items()) or "<p class='muted'>Sin datos.</p>"
-    estado_lines = "".join(f'<div class="rowline"><span>{k.replace("_"," / ")}</span><strong>{v}</strong></div>' for k, v in by_estado.items()) or "<p class='muted'>Sin datos.</p>"
+    user_rows = ""
+    for usuario, data in sorted(by_user.items(), key=lambda item: item[1]["monto"], reverse=True):
+        monto = f"${data['monto']:,.0f}".replace(",", ".")
+        user_rows += f"""
+        <tr>
+            <td><strong>{usuario}</strong></td>
+            <td>{data['documentos']}</td>
+            <td><strong>{monto}</strong></td>
+        </tr>
+        """
+    if not user_rows:
+        user_rows = '<tr><td colspan="3" style="text-align:center;color:#64748b;padding:20px">Sin datos.</td></tr>'
+
+    estado_lines = "".join(
+        f'<div class="rowline"><span>{k.replace("_"," / ")}</span><strong>{v}</strong></div>'
+        for k, v in by_estado.items()
+    ) or "<p class='muted'>Sin datos.</p>"
 
     body = f"""
     <h1>Dashboard</h1><p class="muted">Resumen operativo del periodo seleccionado.</p>
-    {filters_html(start_date, end_date, estado, q)}
+    {filters_html(start_date, end_date, estado, usuario_id, q)}
     {summary_html(resumen)}
+
+    <section class="card">
+      <h2>Reporte por usuario</h2>
+      <p class="muted">Muestra cantidad de documentos y monto total por usuario para el periodo filtrado. Los montos no consideran registros anulados.</p>
+      <div class="table-wrap">
+        <table style="min-width:700px">
+          <thead>
+            <tr>
+              <th>Usuario</th>
+              <th>Número documentos</th>
+              <th>Monto total</th>
+            </tr>
+          </thead>
+          <tbody>{user_rows}</tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="grid">
-      <div class="card"><h2>Por usuario</h2>{user_lines}</div>
       <div class="card"><h2>Por estado</h2>{estado_lines}</div>
     </section>
+
     {table_html(registros, "Últimos movimientos")}
     """
     return page("Dashboard", body)
@@ -478,13 +532,13 @@ def dashboard():
 @app.route("/consultas")
 @login_required
 def consultas():
-    query, start_date, end_date, estado, q = build_query()
+    query, start_date, end_date, estado, usuario_id, q = build_query()
     registros = query.limit(1000).all()
     resumen = summary_for(query)
     body = f"""
     <h1>Consultas</h1><p class="muted">Historial completo con filtros y exportación a Excel.</p>
     {summary_html(resumen)}
-    {filters_html(start_date, end_date, estado, q)}
+    {filters_html(start_date, end_date, estado, usuario_id, q)}
     {table_html(registros, "Historial de documentos")}
     """
     return page("Consultas", body)
@@ -493,7 +547,7 @@ def consultas():
 @app.route("/exportar")
 @login_required
 def exportar():
-    query, start_date, end_date, estado, q = build_query()
+    query, start_date, end_date, estado, usuario_id, q = build_query()
     registros = query.all()
     wb = Workbook()
     ws = wb.active
