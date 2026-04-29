@@ -1,16 +1,4 @@
-services:
-  - type: web
-    name: ferreteria-cloud-tool
-    env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
-    envVars:
-      - key: SECRET_KEY
-        generateValue: true
-      - key: DATABASE_PATH
-        value: /data/ferreteria_cloud_tool.db
-    disk:
-      name: ferreteria-cloud-tool-data
-      mountPath: /data
-      sizeGB: 1
+Flask==3.0.3
+Werkzeug==3.0.3
+openpyxl==3.1.5
+gunicorn==22.0.0
