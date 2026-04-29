@@ -505,6 +505,7 @@ def page(title, body):
                 {'<a href="' + url_for('maquinarias') + '">Maquinarias</a>' if user.role == 'ADMIN' else ''}
             </div>
 
+            {'<a class="admin-link" href="' + url_for('auditoria') + '">Auditoría</a>' if user.role == 'ADMIN' else ''}
             {'<a class="admin-link" href="' + url_for('users') + '">Usuarios</a>' if user.role == 'ADMIN' else ''}
             <span class="pill">{user.name} · {user.role}</span>
             <a class="exit" href="{url_for('logout')}">Salir</a>
@@ -1271,6 +1272,168 @@ def editar_maquinaria(machine_id):
     audit("EDITAR_MAQUINARIA", f"Maquinaria {machine.nombre} actualizada")
     flash("Maquinaria actualizada correctamente.", "success")
     return redirect(url_for("maquinarias"))
+
+
+def audit_filters():
+    today = chile_today()
+    start_date = parse_date(request.args.get("desde"), today)
+    end_date = parse_date(request.args.get("hasta"), today)
+    usuario_id = request.args.get("usuario_id", "").strip()
+    accion = request.args.get("accion", "").strip()
+    q = request.args.get("q", "").strip()
+
+    start_dt = datetime.combine(start_date, time.min)
+    end_dt = datetime.combine(end_date, time.max)
+
+    query = AuditLog.query.filter(AuditLog.created_at.between(start_dt, end_dt))
+
+    if usuario_id:
+        try:
+            query = query.filter(AuditLog.user_id == int(usuario_id))
+        except ValueError:
+            usuario_id = ""
+
+    if accion:
+        query = query.filter(AuditLog.action == accion)
+
+    if q:
+        like = f"%{q}%"
+        query = query.outerjoin(User).filter(
+            db.or_(
+                AuditLog.action.ilike(like),
+                AuditLog.detail.ilike(like),
+                User.username.ilike(like),
+                User.name.ilike(like),
+            )
+        )
+
+    return query.order_by(AuditLog.created_at.desc()), start_date, end_date, usuario_id, accion, q
+
+
+def audit_table(logs):
+    rows = ""
+    for log in logs:
+        rows += f"""
+        <tr>
+          <td>{log.created_at.strftime("%Y-%m-%d %H:%M:%S")}</td>
+          <td><strong>{log.action}</strong></td>
+          <td>{log.user.name if log.user else "Sistema / sin usuario"}</td>
+          <td>{log.user.username if log.user else ""}</td>
+          <td>{log.detail or ""}</td>
+        </tr>
+        """
+    if not rows:
+        rows = '<tr><td colspan="5" style="text-align:center;color:#64748b;padding:24px">Sin movimientos para los filtros seleccionados.</td></tr>'
+
+    return f"""
+    <section class="card">
+      <h2>Historial de auditoría</h2>
+      <div class="table-wrap">
+        <table class="simple-table">
+          <thead>
+            <tr>
+              <th>Fecha / Hora Chile</th>
+              <th>Acción</th>
+              <th>Nombre usuario</th>
+              <th>Usuario</th>
+              <th>Detalle</th>
+            </tr>
+          </thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+    </section>
+    """
+
+
+@app.route("/auditoria")
+@login_required
+@roles_required("ADMIN")
+def auditoria():
+    query, start_date, end_date, usuario_id, accion, q = audit_filters()
+    logs = query.limit(1500).all()
+
+    usuarios = User.query.order_by(User.name.asc()).all()
+    user_options = '<option value="">Todos</option>'
+    for u in usuarios:
+        selected = "selected" if str(u.id) == str(usuario_id) else ""
+        user_options += f'<option value="{u.id}" {selected}>{u.name} ({u.username})</option>'
+
+    acciones = [row[0] for row in db.session.query(AuditLog.action).distinct().order_by(AuditLog.action.asc()).all()]
+    action_options = '<option value="">Todas</option>'
+    for a in acciones:
+        selected = "selected" if a == accion else ""
+        action_options += f'<option value="{a}" {selected}>{a}</option>'
+
+    total = len(logs)
+    usuarios_distintos = len(set([l.user_id for l in logs if l.user_id]))
+    acciones_distintas = len(set([l.action for l in logs]))
+    hoy = sum(1 for l in logs if l.created_at.date() == chile_today())
+
+    body = f"""
+    <h1>Auditoría</h1>
+    <p class="muted">Trazabilidad interna del sistema. Solo usuarios ADMIN pueden revisar este módulo.</p>
+
+    <section class="summary">
+      <div class="card metric"><span>Movimientos visibles</span><strong>{total}</strong></div>
+      <div class="card metric"><span>Usuarios</span><strong>{usuarios_distintos}</strong></div>
+      <div class="card metric"><span>Tipos de acción</span><strong>{acciones_distintas}</strong></div>
+      <div class="card metric"><span>Movimientos hoy</span><strong>{hoy}</strong></div>
+      <div class="card metric"><span>Periodo</span><strong>{start_date} / {end_date}</strong></div>
+    </section>
+
+    <form class="card filters" method="get">
+      <div><label>Desde</label><input type="date" name="desde" value="{start_date}"></div>
+      <div><label>Hasta</label><input type="date" name="hasta" value="{end_date}"></div>
+      <div><label>Usuario</label><select name="usuario_id">{user_options}</select></div>
+      <div><label>Acción</label><select name="accion">{action_options}</select></div>
+      <div class="grow"><label>Buscar</label><input name="q" value="{q}" placeholder="Detalle, acción, usuario..."></div>
+      <button class="btn" type="submit">Filtrar</button>
+      <a class="btn primary" href="{url_for('exportar_auditoria', desde=start_date, hasta=end_date, usuario_id=usuario_id, accion=accion, q=q)}">Exportar Excel</a>
+    </form>
+
+    {audit_table(logs)}
+    """
+    return page("Auditoría", body)
+
+
+@app.route("/auditoria/exportar")
+@login_required
+@roles_required("ADMIN")
+def exportar_auditoria():
+    query, start_date, end_date, usuario_id, accion, q = audit_filters()
+    logs = query.all()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Auditoria"
+
+    headers = ["ID", "Fecha/Hora Chile", "Acción", "Nombre usuario", "Usuario", "Detalle"]
+    ws.append(headers)
+
+    for log in logs:
+        ws.append([
+            log.id,
+            log.created_at.strftime("%Y-%m-%d %H:%M:%S") if log.created_at else "",
+            log.action or "",
+            log.user.name if log.user else "",
+            log.user.username if log.user else "",
+            log.detail or "",
+        ])
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    filename = f"auditoria_{start_date}_{end_date}.xlsx"
+    audit("EXPORTAR_AUDITORIA_EXCEL", filename)
+
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 @app.route("/users", methods=["GET", "POST"])
