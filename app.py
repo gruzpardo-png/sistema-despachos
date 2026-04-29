@@ -495,7 +495,7 @@ def page(title, body):
             <div class="nav-group nav-operacion">
                 <span class="nav-label">Operación</span>
                 <a href="{url_for('despachos')}">Despachos</a>
-                <a href="{url_for('dashboard')}">Dashboard</a>
+                {'<a href="' + url_for('dashboard') + '">Dashboard</a>' if user.role == 'ADMIN' else ''}
                 <a href="{url_for('consultas')}">Consultas</a>
             </div>
 
@@ -748,6 +748,7 @@ def despachos():
 
 @app.route("/dashboard")
 @login_required
+@roles_required("ADMIN")
 def dashboard():
     query, start_date, end_date, estado, usuario_id, q = build_query()
     registros = query.limit(1000).all()
