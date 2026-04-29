@@ -559,12 +559,23 @@ def users():
         name = request.form.get("name", "").strip()
         role = request.form.get("role", "OPERADOR").strip()
         password = request.form.get("password", "").strip()
+
         if not username or not name or not password:
             flash("Usuario, nombre y clave son obligatorios.", "warning")
             return redirect(url_for("users"))
+
+        if role not in {"ADMIN", "SUPERVISOR", "OPERADOR", "LECTURA"}:
+            flash("Rol inválido.", "warning")
+            return redirect(url_for("users"))
+
+        if len(password) < 6:
+            flash("La clave debe tener al menos 6 caracteres.", "warning")
+            return redirect(url_for("users"))
+
         if User.query.filter_by(username=username).first():
             flash("Ese usuario ya existe.", "danger")
             return redirect(url_for("users"))
+
         user = User(username=username, name=name, role=role, active=True)
         user.set_password(password)
         db.session.add(user)
@@ -574,22 +585,185 @@ def users():
         return redirect(url_for("users"))
 
     usuarios = User.query.order_by(User.created_at.desc()).all()
-    rows = "".join(f"<tr><td>{u.username}</td><td>{u.name}</td><td>{u.role}</td><td>{'Sí' if u.active else 'No'}</td><td>{u.created_at.strftime('%Y-%m-%d')}</td></tr>" for u in usuarios)
+
+    rows = ""
+    for u in usuarios:
+        checked_active = "selected" if u.active else ""
+        checked_inactive = "" if u.active else "selected"
+        role_options = ""
+        for role_value in ["ADMIN", "SUPERVISOR", "OPERADOR", "LECTURA"]:
+            selected = "selected" if u.role == role_value else ""
+            role_options += f'<option value="{role_value}" {selected}>{role_value}</option>'
+
+        rows += f"""
+        <tr>
+          <td>
+            <form method="post" action="{url_for('editar_usuario', user_id=u.id)}" id="edit_user_{u.id}"></form>
+            <input form="edit_user_{u.id}" name="username" value="{u.username}" required>
+          </td>
+          <td>
+            <input form="edit_user_{u.id}" name="name" value="{u.name}" required>
+          </td>
+          <td>
+            <select form="edit_user_{u.id}" name="role">{role_options}</select>
+          </td>
+          <td>
+            <select form="edit_user_{u.id}" name="active">
+              <option value="1" {checked_active}>Sí</option>
+              <option value="0" {checked_inactive}>No</option>
+            </select>
+          </td>
+          <td>
+            <input form="edit_user_{u.id}" name="password" type="password" placeholder="Nueva clave opcional">
+          </td>
+          <td>{u.created_at.strftime('%Y-%m-%d')}</td>
+          <td style="min-width:220px">
+            <button form="edit_user_{u.id}" class="btn primary" type="submit">Guardar</button>
+            <form method="post" action="{url_for('toggle_usuario', user_id=u.id)}" style="display:inline">
+              <button class="btn danger-btn" type="submit">{'Desactivar' if u.active else 'Activar'}</button>
+            </form>
+          </td>
+        </tr>
+        """
+
     body = f"""
-    <h1>Usuarios</h1><p class="muted">Administración de usuarios internos.</p>
+    <h1>Usuarios</h1>
+    <p class="muted">Administración completa de usuarios internos: crear, editar nombre, rol, estado y clave.</p>
+
     <section class="card">
       <h2>Crear usuario</h2>
       <form method="post" class="grid">
-        <div><label>Usuario</label><input name="username" required></div>
-        <div><label>Nombre</label><input name="name" required></div>
-        <div><label>Rol</label><select name="role"><option value="ADMIN">ADMIN</option><option value="SUPERVISOR">SUPERVISOR</option><option value="OPERADOR">OPERADOR</option><option value="LECTURA">LECTURA</option></select></div>
-        <div><label>Clave</label><input name="password" type="password" required></div>
+        <div>
+          <label>Usuario</label>
+          <input name="username" required placeholder="ej: camilo">
+        </div>
+        <div>
+          <label>Nombre visible</label>
+          <input name="name" required placeholder="ej: CAMILO_LLANCA">
+        </div>
+        <div>
+          <label>Rol</label>
+          <select name="role">
+            <option value="ADMIN">ADMIN</option>
+            <option value="SUPERVISOR">SUPERVISOR</option>
+            <option value="OPERADOR">OPERADOR</option>
+            <option value="LECTURA">LECTURA</option>
+          </select>
+        </div>
+        <div>
+          <label>Clave</label>
+          <input name="password" type="password" required placeholder="mínimo 6 caracteres">
+        </div>
         <button class="btn primary full" type="submit">Crear usuario</button>
       </form>
     </section>
-    <section class="card"><h2>Usuarios registrados</h2><div class="table-wrap"><table><thead><tr><th>Usuario</th><th>Nombre</th><th>Rol</th><th>Activo</th><th>Creado</th></tr></thead><tbody>{rows}</tbody></table></div></section>
+
+    <section class="card">
+      <h2>Usuarios registrados</h2>
+      <p class="muted">Para cambiar clave, escribe una nueva clave en “Nueva clave opcional”. Si lo dejas vacío, conserva la clave actual.</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Usuario</th>
+              <th>Nombre visible</th>
+              <th>Rol</th>
+              <th>Activo</th>
+              <th>Nueva clave</th>
+              <th>Creado</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Roles recomendados</h2>
+      <div class="rowline"><span><strong>ADMIN</strong> — controla usuarios, anula registros y administra el sistema.</span></div>
+      <div class="rowline"><span><strong>SUPERVISOR</strong> — puede anular registros y revisar operación.</span></div>
+      <div class="rowline"><span><strong>OPERADOR</strong> — puede crear registros y cambiar pendientes/entregados.</span></div>
+      <div class="rowline"><span><strong>LECTURA</strong> — recomendado para consulta sin operación sensible.</span></div>
+    </section>
     """
     return page("Usuarios", body)
+
+
+@app.route("/users/<int:user_id>/editar", methods=["POST"])
+@login_required
+@roles_required("ADMIN")
+def editar_usuario(user_id):
+    usuario = db.session.get(User, user_id)
+    if not usuario:
+        flash("Usuario no encontrado.", "danger")
+        return redirect(url_for("users"))
+
+    username = request.form.get("username", "").strip()
+    name = request.form.get("name", "").strip()
+    role = request.form.get("role", "OPERADOR").strip()
+    active = request.form.get("active") == "1"
+    password = request.form.get("password", "").strip()
+
+    if not username or not name:
+        flash("Usuario y nombre son obligatorios.", "warning")
+        return redirect(url_for("users"))
+
+    if role not in {"ADMIN", "SUPERVISOR", "OPERADOR", "LECTURA"}:
+        flash("Rol inválido.", "warning")
+        return redirect(url_for("users"))
+
+    existing = User.query.filter(User.username == username, User.id != user_id).first()
+    if existing:
+        flash("Ya existe otro usuario con ese nombre de usuario.", "danger")
+        return redirect(url_for("users"))
+
+    current = current_user()
+    if usuario.id == current.id and role != "ADMIN":
+        flash("No puedes quitarte tu propio rol ADMIN.", "danger")
+        return redirect(url_for("users"))
+
+    if usuario.id == current.id and not active:
+        flash("No puedes desactivar tu propio usuario.", "danger")
+        return redirect(url_for("users"))
+
+    usuario.username = username
+    usuario.name = name
+    usuario.role = role
+    usuario.active = active
+
+    if password:
+        if len(password) < 6:
+            flash("La nueva clave debe tener al menos 6 caracteres.", "warning")
+            return redirect(url_for("users"))
+        usuario.set_password(password)
+
+    db.session.commit()
+    audit("EDITAR_USUARIO", f"Usuario {usuario.username} actualizado")
+    flash("Usuario actualizado correctamente.", "success")
+    return redirect(url_for("users"))
+
+
+@app.route("/users/<int:user_id>/toggle", methods=["POST"])
+@login_required
+@roles_required("ADMIN")
+def toggle_usuario(user_id):
+    usuario = db.session.get(User, user_id)
+    if not usuario:
+        flash("Usuario no encontrado.", "danger")
+        return redirect(url_for("users"))
+
+    if usuario.id == current_user().id:
+        flash("No puedes desactivar tu propio usuario.", "danger")
+        return redirect(url_for("users"))
+
+    usuario.active = not usuario.active
+    db.session.commit()
+    estado = "activado" if usuario.active else "desactivado"
+    audit("CAMBIAR_ESTADO_USUARIO", f"Usuario {usuario.username} {estado}")
+    flash(f"Usuario {estado} correctamente.", "success")
+    return redirect(url_for("users"))
+
 
 
 @app.errorhandler(404)
