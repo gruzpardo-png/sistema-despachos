@@ -1,54 +1,95 @@
-# Ferretería Cloud Tool - v4 Administración
+# Ferretería Cloud Tool - v4.2 Data Safe
 
-Versión actualizada lista para subir a Render.
+Versión actualizada para subir a Render sin perder datos anteriores.
 
-## Incluye
+## Cambios principales
 
-- Login con usuarios.
-- Roles y permisos.
-- Dashboard visible solo para administradores.
-- Módulo Despachos.
-- Módulo Mantenciones.
-- Módulo Consulta.
-- Módulo Administración / Configuración.
+- Despacho rápido para operadores.
+- Estados de despacho operativos:
+  - Entregado por defecto.
+  - Pendiente.
+- Dashboard solo administradores.
+- Administración / Configuración solo administradores.
 - Usuarios y permisos.
-- Maquinarias editable solo por admin.
+- Maquinarias.
 - Vehículos / patentes.
-- Conductores y pionetas.
-- Auditoría de cambios.
-- Exportación a Excel.
-- Sección futura para Facturación.cl.
+- Conductores / pionetas.
+- Mantenciones.
+- Auditoría.
+- Exportación Excel.
+- Backup completo de base de datos desde el sistema.
+- Respaldo automático antes de migraciones.
+
+## Regla importante de actualización
+
+Esta versión está preparada para actualizar sin borrar datos, siempre que la base SQLite esté en un Disk persistente de Render.
+
+La variable debe ser:
+
+```txt
+DATABASE_PATH=/data/ferreteria_cloud_tool.db
+```
+
+Y el servicio debe tener Disk:
+
+```txt
+Mount path: /data
+```
+
+Si la base queda dentro del contenedor normal, por ejemplo `ferreteria_cloud_tool.db` sin `/data`, Render puede reemplazarla en cada deploy.
+
+## Qué NO hace esta versión
+
+- No usa `DROP TABLE`.
+- No borra tablas.
+- No borra usuarios.
+- No borra despachos.
+- No borra maquinarias.
+- No borra mantenciones.
+- No reinicia la configuración.
+- No reemplaza la base existente.
+
+## Qué SÍ hace esta versión
+
+- Usa `CREATE TABLE IF NOT EXISTS`.
+- Usa `ALTER TABLE ADD COLUMN` solo si falta una columna.
+- Crea respaldo automático antes de migrar.
+- Permite descargar backup manual desde:
+  - Exportar Excel / Reportes > Backup base de datos.
 
 ## Usuarios iniciales
 
-Admin:
+Solo se crean si no existen.
 
-- Usuario: `admin`
-- Contraseña: `admin123`
+```txt
+Admin:
+usuario: admin
+clave: admin123
 
 Operador:
+usuario: operador
+clave: operador123
+```
 
-- Usuario: `operador`
-- Contraseña: `operador123`
+Si esos usuarios ya existen en tu base, no se reemplazan.
 
-Cambia estas claves después de entrar en Administración > Usuarios.
+## Antes de subir una actualización
 
-## Subir a Render
+1. Entra como admin.
+2. Ve a Exportar Excel / Reportes.
+3. Descarga `Backup base de datos`.
+4. Sube el nuevo código.
+5. Verifica que `DATABASE_PATH` siga siendo `/data/ferreteria_cloud_tool.db`.
+6. Verifica que el Disk siga montado en `/data`.
 
-1. Descomprime este ZIP.
-2. Sube todos los archivos a tu repositorio GitHub.
-3. En Render, crea un nuevo Web Service conectado a ese repositorio.
-4. Render debería detectar `render.yaml`.
-5. Si lo haces manual:
-   - Build command: `pip install -r requirements.txt`
-   - Start command: `gunicorn app:app`
-6. Agrega estas variables:
-   - `SECRET_KEY`: una clave larga aleatoria.
-   - `DATABASE_PATH`: `/data/ferreteria_cloud_tool.db`
-7. Agrega un Disk:
-   - Mount path: `/data`
-   - Size: 1 GB
+## Render
 
-## Importante
+El archivo `render.yaml` ya viene configurado con:
 
-SQLite en Render necesita Disk persistente. Si no agregas Disk, la base puede perderse al reiniciar.
+```yaml
+DATABASE_PATH: /data/ferreteria_cloud_tool.db
+disk:
+  mountPath: /data
+```
+
+Si ya tienes un servicio creado en Render, revisa manualmente que el Disk esté agregado.
