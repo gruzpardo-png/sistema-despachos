@@ -423,8 +423,62 @@ th{background:#f8fafc;position:sticky;top:0}
   min-height:40px;
   padding:9px 14px;
 }
+
+.nav-group{
+  display:flex;
+  align-items:center;
+  gap:9px;
+  padding:6px 10px;
+  border-radius:14px;
+  border:1px solid #e2e8f0;
+}
+.nav-group a{
+  padding:4px 2px;
+}
+.nav-operacion{
+  background:#f8fafc;
+  border-color:#cbd5e1;
+}
+.nav-bodega{
+  background:#ecfdf5;
+  border-color:#5eead4;
+  margin-left:10px;
+  box-shadow:inset 3px 0 0 #0f766e;
+}
+.nav-label{
+  font-size:10px;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+  color:#64748b;
+  font-weight:900;
+  padding-right:4px;
+  border-right:1px solid #cbd5e1;
+}
+.nav-bodega .nav-label{
+  color:#047857;
+  border-right-color:#99f6e4;
+}
+.admin-link{
+  background:#fef3c7;
+  border:1px solid #fbbf24;
+  border-radius:12px;
+  padding:8px 10px;
+}
+.edit-table input,.edit-table select{
+  min-width:140px;
+  min-height:34px;
+  padding:7px 9px;
+  font-size:12px;
+}
+.edit-table .wide-input{
+  min-width:240px;
+}
+.edit-table .obs-input{
+  min-width:320px;
+}
+
 @media(max-width:900px){
-  .topbar{flex-direction:column;align-items:flex-start}
+  .topbar{flex-direction:column;align-items:flex-start}.nav-group{width:100%;justify-content:flex-start}.nav-bodega{margin-left:0}
   .grid,.summary{grid-template-columns:1fr}
   .container{padding:14px}
 }
@@ -438,12 +492,20 @@ def page(title, body):
     if user:
         nav = f"""
         <nav class="nav">
-            <a href="{url_for('despachos')}">Despachos</a>
-            <a href="{url_for('dashboard')}">Dashboard</a>
-            <a href="{url_for('consultas')}">Consultas</a>
-            <a href="{url_for('mantenciones')}">Mantenciones</a>
-            {'<a href="' + url_for('maquinarias') + '">Maquinarias</a>' if user.role in ['ADMIN', 'SUPERVISOR'] else ''}
-            {'<a href="' + url_for('users') + '">Usuarios</a>' if user.role == 'ADMIN' else ''}
+            <div class="nav-group nav-operacion">
+                <span class="nav-label">Operación</span>
+                <a href="{url_for('despachos')}">Despachos</a>
+                <a href="{url_for('dashboard')}">Dashboard</a>
+                <a href="{url_for('consultas')}">Consultas</a>
+            </div>
+
+            <div class="nav-group nav-bodega">
+                <span class="nav-label">Bodega</span>
+                <a href="{url_for('mantenciones')}">Mantenciones</a>
+                {'<a href="' + url_for('maquinarias') + '">Maquinarias</a>' if user.role == 'ADMIN' else ''}
+            </div>
+
+            {'<a class="admin-link" href="' + url_for('users') + '">Usuarios</a>' if user.role == 'ADMIN' else ''}
             <span class="pill">{user.name} · {user.role}</span>
             <a class="exit" href="{url_for('logout')}">Salir</a>
         </nav>
@@ -1023,6 +1085,7 @@ def mantenciones():
       <div><label>Tipo</label><select name="tipo"><option value="">Todos</option><option value="PREVENTIVA" {sel_tipo("PREVENTIVA")}>Preventiva</option><option value="CORRECTIVA" {sel_tipo("CORRECTIVA")}>Correctiva</option><option value="REVISIÓN" {sel_tipo("REVISIÓN")}>Revisión</option><option value="CAMBIO ACEITE/FILTROS" {sel_tipo("CAMBIO ACEITE/FILTROS")}>Aceite/Filtros</option><option value="NEUMÁTICOS" {sel_tipo("NEUMÁTICOS")}>Neumáticos</option><option value="FRENOS" {sel_tipo("FRENOS")}>Frenos</option><option value="ELÉCTRICA" {sel_tipo("ELÉCTRICA")}>Eléctrica</option><option value="OTRA" {sel_tipo("OTRA")}>Otra</option></select></div>
       <div class="grow"><label>Buscar</label><input name="q" value="{q}" placeholder="Maquinaria, taller, responsable, detalle..."></div>
       <button class="btn" type="submit">Filtrar</button>
+      <a class="btn primary" href="{url_for('exportar_mantenciones', desde=start_date, hasta=end_date, machine_id=machine_id, estado=estado, tipo=tipo, q=q)}">Exportar Excel</a>
     </form>
 
     {maintenance_table(registros)}
@@ -1030,9 +1093,64 @@ def mantenciones():
     return page("Mantenciones", body)
 
 
+@app.route("/mantenciones/exportar")
+@login_required
+def exportar_mantenciones():
+    query, start_date, end_date, machine_id, estado, tipo, q = maintenance_filters()
+    registros = query.all()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Mantenciones"
+
+    headers = [
+        "ID", "Fecha", "Maquinaria", "Tipo equipo", "Patente/Código", "Sucursal",
+        "Estado maquinaria", "Tipo mantención", "Estado mantención", "KM/Horómetro",
+        "Proveedor/Taller", "Responsable", "Costo", "Detalle", "Próxima fecha",
+        "Próximo KM/Horas", "Usuario registro", "Fecha registro"
+    ]
+    ws.append(headers)
+
+    for m in registros:
+        ws.append([
+            m.id,
+            m.fecha.strftime("%Y-%m-%d") if m.fecha else "",
+            m.machine.nombre if m.machine else "",
+            m.machine.tipo if m.machine else "",
+            m.machine.patente_codigo if m.machine else "",
+            m.machine.sucursal if m.machine else "",
+            m.machine.estado if m.machine else "",
+            m.tipo_mantencion or "",
+            m.estado or "",
+            m.kilometraje_horometro or "",
+            m.proveedor_taller or "",
+            m.responsable or "",
+            m.costo or 0,
+            m.detalle or "",
+            m.proxima_fecha.strftime("%Y-%m-%d") if m.proxima_fecha else "",
+            m.proximo_km_horas or "",
+            m.created_by.name if m.created_by else "",
+            m.created_at.strftime("%Y-%m-%d %H:%M:%S") if m.created_at else "",
+        ])
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    filename = f"mantenciones_{start_date}_{end_date}.xlsx"
+    audit("EXPORTAR_MANTENCIONES_EXCEL", filename)
+
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 @app.route("/maquinarias", methods=["GET", "POST"])
 @login_required
-@roles_required("ADMIN", "SUPERVISOR")
+@roles_required("ADMIN")
 def maquinarias():
     if request.method == "POST":
         nombre = request.form.get("nombre", "").strip()
@@ -1058,21 +1176,34 @@ def maquinarias():
 
     machines = Machine.query.order_by(Machine.tipo.asc(), Machine.nombre.asc()).all()
     rows = ""
+
+    def opt_tipo(actual):
+        values = ["CAMIÓN", "GRÚA HORQUILLA", "CAMIONETA", "OTRA"]
+        return "".join(f'<option value="{v}" {"selected" if actual == v else ""}>{v}</option>' for v in values)
+
+    def opt_estado(actual):
+        values = ["OPERATIVA", "EN MANTENCIÓN", "FUERA DE SERVICIO"]
+        return "".join(f'<option value="{v}" {"selected" if actual == v else ""}>{v}</option>' for v in values)
+
     for m in machines:
         rows += f"""
         <tr>
-          <td><strong>{m.nombre}</strong></td>
-          <td>{m.tipo}</td>
-          <td>{m.patente_codigo or ""}</td>
-          <td>{m.sucursal or ""}</td>
-          <td>{m.marca_modelo or ""}</td>
-          <td><span class="status {m.estado}">{m.estado}</span></td>
-          <td>{m.observacion or ""}</td>
+          <td>
+            <form method="post" action="{url_for('editar_maquinaria', machine_id=m.id)}" id="edit_machine_{m.id}"></form>
+            <input form="edit_machine_{m.id}" class="wide-input" name="nombre" value="{m.nombre}" required>
+          </td>
+          <td><select form="edit_machine_{m.id}" name="tipo">{opt_tipo(m.tipo)}</select></td>
+          <td><input form="edit_machine_{m.id}" name="patente_codigo" value="{m.patente_codigo or ''}"></td>
+          <td><input form="edit_machine_{m.id}" name="sucursal" value="{m.sucursal or ''}"></td>
+          <td><input form="edit_machine_{m.id}" name="marca_modelo" value="{m.marca_modelo or ''}"></td>
+          <td><select form="edit_machine_{m.id}" name="estado">{opt_estado(m.estado)}</select></td>
+          <td><input form="edit_machine_{m.id}" class="obs-input" name="observacion" value="{m.observacion or ''}"></td>
+          <td><button form="edit_machine_{m.id}" class="btn primary" type="submit">Guardar</button></td>
         </tr>
         """
     body = f"""
     <h1>Maquinarias</h1>
-    <p class="muted">Maestro de equipos disponibles para control de mantenciones.</p>
+    <p class="muted">Maestro editable de equipos. Solo usuarios ADMIN pueden crear o modificar maquinarias.</p>
 
     <section class="card compact-form-card">
       <h2>Agregar maquinaria</h2>
@@ -1089,16 +1220,56 @@ def maquinarias():
     </section>
 
     <section class="card">
-      <h2>Maquinarias registradas</h2>
+      <h2>Editar maquinarias registradas</h2>
+      <p class="muted">Puedes modificar nombre, tipo, patente/código, sucursal, marca/modelo, estado y observación. No se eliminan maquinarias para no perder historial de mantenciones.</p>
       <div class="table-wrap">
-        <table class="simple-table">
-          <thead><tr><th>Nombre</th><th>Tipo</th><th>Patente/Código</th><th>Sucursal</th><th>Marca/Modelo</th><th>Estado</th><th>Observación</th></tr></thead>
+        <table class="edit-table">
+          <thead><tr><th>Nombre</th><th>Tipo</th><th>Patente/Código</th><th>Sucursal</th><th>Marca/Modelo</th><th>Estado</th><th>Observación</th><th>Acción</th></tr></thead>
           <tbody>{rows}</tbody>
         </table>
       </div>
     </section>
     """
     return page("Maquinarias", body)
+
+
+@app.route("/maquinarias/<int:machine_id>/editar", methods=["POST"])
+@login_required
+@roles_required("ADMIN")
+def editar_maquinaria(machine_id):
+    machine = db.session.get(Machine, machine_id)
+    if not machine:
+        flash("Maquinaria no encontrada.", "danger")
+        return redirect(url_for("maquinarias"))
+
+    nombre = request.form.get("nombre", "").strip()
+    tipo = request.form.get("tipo", "CAMIÓN").strip()
+    estado = request.form.get("estado", "OPERATIVA").strip()
+
+    if not nombre:
+        flash("El nombre de la maquinaria es obligatorio.", "warning")
+        return redirect(url_for("maquinarias"))
+
+    if tipo not in {"CAMIÓN", "GRÚA HORQUILLA", "CAMIONETA", "OTRA"}:
+        flash("Tipo de maquinaria inválido.", "warning")
+        return redirect(url_for("maquinarias"))
+
+    if estado not in {"OPERATIVA", "EN MANTENCIÓN", "FUERA DE SERVICIO"}:
+        flash("Estado de maquinaria inválido.", "warning")
+        return redirect(url_for("maquinarias"))
+
+    machine.nombre = nombre
+    machine.tipo = tipo
+    machine.patente_codigo = request.form.get("patente_codigo", "").strip().upper()
+    machine.sucursal = request.form.get("sucursal", "").strip()
+    machine.marca_modelo = request.form.get("marca_modelo", "").strip()
+    machine.estado = estado
+    machine.observacion = request.form.get("observacion", "").strip()
+
+    db.session.commit()
+    audit("EDITAR_MAQUINARIA", f"Maquinaria {machine.nombre} actualizada")
+    flash("Maquinaria actualizada correctamente.", "success")
+    return redirect(url_for("maquinarias"))
 
 
 @app.route("/users", methods=["GET", "POST"])
