@@ -16,7 +16,7 @@ from openpyxl import Workbook
 
 
 APP_NAME = "Ferretería Cloud Tool"
-APP_VERSION = "v4.0 Administración"
+APP_VERSION = "v4.1 Despacho rápido"
 DB_PATH = os.environ.get("DATABASE_PATH", "ferreteria_cloud_tool.db")
 SECRET_KEY = os.environ.get("SECRET_KEY", "cambiar-esta-clave-en-render")
 
@@ -329,7 +329,7 @@ def init_db():
 
     # Configuración inicial.
     defaults = {
-        "estados_despacho": ["Pendiente", "Entregado", "Retirado", "Anulado"],
+        "estados_despacho": ["Entregado", "Pendiente"],
         "tipos_documento": ["Factura", "Boleta", "Guía de despacho", "Otro"],
         "sucursales": ["Sucursal 1", "Sucursal 2", "La Americana"],
         "estados_maquinaria": ["Activa", "En mantención", "Fuera de servicio", "Vendida / dada de baja"],
@@ -340,6 +340,9 @@ def init_db():
         row = query_one("SELECT id FROM system_config WHERE clave = ?", (clave,))
         if not row:
             set_config_list(clave, valor)
+
+    # Fuerza el flujo operativo simple solicitado: solo Entregado y Pendiente.
+    set_config_list("estados_despacho", ["Entregado", "Pendiente"])
 
     # Usuario admin inicial.
     admin = query_one("SELECT id FROM users WHERE username = ?", ("admin",))
@@ -942,7 +945,6 @@ def dashboard():
         "total_despachos": query_one("SELECT COUNT(*) c FROM despachos")["c"],
         "pendientes": query_one("SELECT COUNT(*) c FROM despachos WHERE estado = 'Pendiente'")["c"],
         "entregados": query_one("SELECT COUNT(*) c FROM despachos WHERE estado = 'Entregado'")["c"],
-        "retirados": query_one("SELECT COUNT(*) c FROM despachos WHERE estado = 'Retirado'")["c"],
         "monto_total": query_one("SELECT COALESCE(SUM(monto),0) total FROM despachos")["total"],
         "mant_pendientes": query_one("SELECT COUNT(*) c FROM mantenciones WHERE estado IN ('Pendiente','En proceso')")["c"],
         "maq_fuera": query_one("SELECT COUNT(*) c FROM maquinarias WHERE estado IN ('En mantención','Fuera de servicio')")["c"],
@@ -957,10 +959,10 @@ def dashboard():
         LIMIT 10
     """)
 
-    por_patente = query_all("""
-        SELECT COALESCE(NULLIF(patente,''), 'Sin patente') patente, COUNT(*) total
+    por_estado = query_all("""
+        SELECT COALESCE(NULLIF(estado,''), 'Sin estado') estado, COUNT(*) total, COALESCE(SUM(monto),0) monto
         FROM despachos
-        GROUP BY COALESCE(NULLIF(patente,''), 'Sin patente')
+        GROUP BY COALESCE(NULLIF(estado,''), 'Sin estado')
         ORDER BY total DESC
         LIMIT 10
     """)
@@ -982,16 +984,15 @@ def dashboard():
     <div class="page-head">
         <div>
             <h1>Dashboard Admin</h1>
-            <p>Resumen ejecutivo de despachos, mantenciones, usuarios y alertas operacionales.</p>
+            <p>Resumen ejecutivo de despachos rápidos, mantenciones, usuarios y alertas operacionales.</p>
         </div>
     </div>
 
     <div class="grid grid-4">
         <div class="stat"><span>Total despachos</span><strong>{{ stats.total_despachos }}</strong></div>
-        <div class="stat"><span>Pendientes</span><strong>{{ stats.pendientes }}</strong></div>
         <div class="stat"><span>Entregados</span><strong>{{ stats.entregados }}</strong></div>
+        <div class="stat"><span>Pendientes</span><strong>{{ stats.pendientes }}</strong></div>
         <div class="stat"><span>Monto documentado</span><strong>{{ stats.monto_total|money }}</strong></div>
-        <div class="stat"><span>Retirados</span><strong>{{ stats.retirados }}</strong></div>
         <div class="stat"><span>Mantenciones pendientes</span><strong>{{ stats.mant_pendientes }}</strong></div>
         <div class="stat"><span>Maquinarias con alerta</span><strong>{{ stats.maq_fuera }}</strong></div>
         <div class="stat"><span>Usuarios activos</span><strong>{{ stats.usuarios }}</strong></div>
@@ -1017,14 +1018,14 @@ def dashboard():
         </div>
 
         <div class="card">
-            <h3>Despachos por patente</h3>
+            <h3>Despachos por estado</h3>
             <div class="table-wrap">
                 <table>
-                    <tr><th>Patente</th><th>Total</th></tr>
-                    {% for r in por_patente %}
-                    <tr><td>{{ r.patente }}</td><td>{{ r.total }}</td></tr>
+                    <tr><th>Estado</th><th>Total</th><th>Monto</th></tr>
+                    {% for r in por_estado %}
+                    <tr><td>{{ r.estado }}</td><td>{{ r.total }}</td><td>{{ r.monto|money }}</td></tr>
                     {% else %}
-                    <tr><td colspan="2" class="muted">Sin datos.</td></tr>
+                    <tr><td colspan="3" class="muted">Sin datos.</td></tr>
                     {% endfor %}
                 </table>
             </div>
@@ -1055,24 +1056,24 @@ def dashboard():
             <h3>Últimos despachos</h3>
             <div class="table-wrap">
                 <table>
-                    <tr><th>Documento</th><th>Cliente</th><th>Estado</th><th>Monto</th></tr>
+                    <tr><th>Documento</th><th>Estado</th><th>Monto</th><th>Usuario</th><th>Fecha</th></tr>
                     {% for d in recientes %}
                     <tr>
                         <td>{{ d.tipo_documento }} {{ d.numero_documento }}</td>
-                        <td>{{ d.cliente }}</td>
                         <td><span class="badge {% if d.estado == 'Entregado' %}ok{% elif d.estado == 'Pendiente' %}warn{% else %}info{% endif %}">{{ d.estado }}</span></td>
                         <td>{{ d.monto|money }}</td>
+                        <td>{{ d.usuario_nombre }}</td>
+                        <td>{{ d.created_at }}</td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="4" class="muted">Sin registros.</td></tr>
+                    <tr><td colspan="5" class="muted">Sin registros.</td></tr>
                     {% endfor %}
                 </table>
             </div>
         </div>
     </div>
-    """, stats=stats, por_usuario=por_usuario, por_patente=por_patente,
+    """, stats=stats, por_usuario=por_usuario, por_estado=por_estado,
        mantenciones_pendientes=mantenciones_pendientes, recientes=recientes)
-
 
 # ============================================================
 # DESPACHOS
@@ -1082,21 +1083,19 @@ def dashboard():
 @login_required
 @permission_required("despachos")
 def despachos():
-    estados = get_config_list("estados_despacho")
+    estados = ["Entregado", "Pendiente"]
     tipos = get_config_list("tipos_documento")
-    vehs = query_all("SELECT patente FROM vehiculos WHERE estado = 'Activo' ORDER BY patente")
-    conductores = query_all("SELECT nombre FROM personas_logistica WHERE tipo = 'Conductor' AND estado = 'Activo' ORDER BY nombre")
-    pionetas = query_all("SELECT nombre FROM personas_logistica WHERE tipo = 'Pioneta' AND estado = 'Activo' ORDER BY nombre")
 
     if request.method == "POST":
         user = current_user()
         numero = request.form.get("numero_documento", "").strip()
         tipo = request.form.get("tipo_documento", "").strip()
-        estado = request.form.get("estado", "").strip()
-        cliente = request.form.get("cliente", "").strip()
+        estado = request.form.get("estado", "Entregado").strip() or "Entregado"
+        if estado not in estados:
+            estado = "Entregado"
 
-        if not numero or not tipo or not estado or not cliente:
-            flash("Documento, tipo, estado y cliente son obligatorios.", "error")
+        if not numero or not tipo:
+            flash("Número de documento y tipo de documento son obligatorios.", "error")
         else:
             new_id = insert_and_get_id("""
                 INSERT INTO despachos (
@@ -1109,19 +1108,19 @@ def despachos():
                 numero,
                 tipo,
                 estado,
-                cliente,
-                request.form.get("telefono", "").strip(),
-                request.form.get("destino", "").strip(),
-                request.form.get("patente", "").strip(),
-                request.form.get("conductor", "").strip(),
-                request.form.get("pioneta", "").strip(),
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
                 money_to_float(request.form.get("monto")),
                 user["id"],
                 user["full_name"],
                 now_str(),
                 now_str(),
             ))
-            write_audit("despachos", "crear", new_id, "registro", "", f"{tipo} {numero}")
+            write_audit("despachos", "crear", new_id, "registro", "", f"{tipo} {numero} / {estado}")
             flash("Despacho registrado correctamente.", "success")
             return redirect(url_for("despachos"))
 
@@ -1132,17 +1131,17 @@ def despachos():
     <div class="page-head">
         <div>
             <h1>Módulo Despachos</h1>
-            <p>Registro simple para operación diaria. Auditoría y edición quedan restringidas a administración.</p>
+            <p>Registro rápido para operadores: documento, tipo, estado y monto. El usuario queda registrado automáticamente.</p>
         </div>
     </div>
 
     <div class="card">
-        <h2>Nuevo registro de despacho</h2>
+        <h2>Nuevo registro rápido</h2>
         <form method="post">
             <div class="form-row">
                 <div>
                     <label>Número documento *</label>
-                    <input name="numero_documento" required>
+                    <input name="numero_documento" required autofocus>
                 </div>
                 <div>
                     <label>Tipo documento *</label>
@@ -1151,57 +1150,15 @@ def despachos():
                     </select>
                 </div>
                 <div>
-                    <label>Estado inicial *</label>
+                    <label>Estado *</label>
                     <select name="estado" required>
-                        {% for e in estados %}<option>{{ e }}</option>{% endfor %}
+                        <option value="Entregado" selected>Entregado</option>
+                        <option value="Pendiente">Pendiente</option>
                     </select>
                 </div>
                 <div>
                     <label>Monto documento</label>
                     <input name="monto" inputmode="decimal" placeholder="Ej: 120000">
-                </div>
-            </div>
-
-            <div class="form-row" style="margin-top:14px;">
-                <div>
-                    <label>Cliente *</label>
-                    <input name="cliente" required>
-                </div>
-                <div>
-                    <label>Teléfono</label>
-                    <input name="telefono">
-                </div>
-                <div>
-                    <label>Destino</label>
-                    <input name="destino">
-                </div>
-                <div>
-                    <label>Usuario</label>
-                    <input value="{{ user.full_name }}" disabled>
-                </div>
-            </div>
-
-            <div class="form-row-3" style="margin-top:14px;">
-                <div>
-                    <label>Patente</label>
-                    <input name="patente" list="patentes">
-                    <datalist id="patentes">
-                        {% for v in vehs %}<option value="{{ v.patente }}">{% endfor %}
-                    </datalist>
-                </div>
-                <div>
-                    <label>Conductor</label>
-                    <input name="conductor" list="conductores">
-                    <datalist id="conductores">
-                        {% for c in conductores %}<option value="{{ c.nombre }}">{% endfor %}
-                    </datalist>
-                </div>
-                <div>
-                    <label>Pioneta</label>
-                    <input name="pioneta" list="pionetas">
-                    <datalist id="pionetas">
-                        {% for p in pionetas %}<option value="{{ p.nombre }}">{% endfor %}
-                    </datalist>
                 </div>
             </div>
 
@@ -1220,17 +1177,13 @@ def despachos():
         <div class="table-wrap">
             <table>
                 <tr>
-                    <th>ID</th><th>Documento</th><th>Estado</th><th>Cliente</th><th>Patente</th>
-                    <th>Conductor</th><th>Monto</th><th>Usuario</th><th>Fecha</th>{% if is_admin %}<th>Acción</th>{% endif %}
+                    <th>ID</th><th>Documento</th><th>Estado</th><th>Monto</th><th>Usuario</th><th>Fecha</th>{% if is_admin %}<th>Acción</th>{% endif %}
                 </tr>
                 {% for d in recientes %}
                 <tr>
                     <td>{{ d.id }}</td>
                     <td>{{ d.tipo_documento }} {{ d.numero_documento }}</td>
                     <td><span class="badge {% if d.estado == 'Entregado' %}ok{% elif d.estado == 'Pendiente' %}warn{% else %}info{% endif %}">{{ d.estado }}</span></td>
-                    <td>{{ d.cliente }}</td>
-                    <td>{{ d.patente }}</td>
-                    <td>{{ d.conductor }}</td>
                     <td>{{ d.monto|money }}</td>
                     <td>{{ d.usuario_nombre }}</td>
                     <td>{{ d.created_at }}</td>
@@ -1239,7 +1192,7 @@ def despachos():
                     {% endif %}
                 </tr>
                 {% else %}
-                <tr><td colspan="10" class="muted">Sin registros.</td></tr>
+                <tr><td colspan="7" class="muted">Sin registros.</td></tr>
                 {% endfor %}
             </table>
         </div>
@@ -1263,9 +1216,7 @@ def despachos():
         </div>
     </div>
     {% endif %}
-    """, estados=estados, tipos=tipos, vehs=vehs, conductores=conductores,
-       pionetas=pionetas, recientes=recientes, audit=audit, user=current_user(), is_admin=is_admin())
-
+    """, estados=estados, tipos=tipos, recientes=recientes, audit=audit, is_admin=is_admin())
 
 @app.route("/despachos/<int:despacho_id>/editar", methods=["GET", "POST"])
 @login_required
@@ -1276,22 +1227,19 @@ def edit_despacho(despacho_id):
         flash("Despacho no encontrado.", "error")
         return redirect(url_for("despachos"))
 
-    estados = get_config_list("estados_despacho")
+    estados = ["Entregado", "Pendiente"]
     tipos = get_config_list("tipos_documento")
-
-    fields = ["numero_documento", "tipo_documento", "estado", "cliente", "telefono", "destino", "patente", "conductor", "pioneta", "monto"]
+    fields = ["numero_documento", "tipo_documento", "estado", "monto"]
 
     if request.method == "POST":
+        estado = request.form.get("estado", "Entregado").strip() or "Entregado"
+        if estado not in estados:
+            estado = "Entregado"
+
         new_data = {
             "numero_documento": request.form.get("numero_documento", "").strip(),
             "tipo_documento": request.form.get("tipo_documento", "").strip(),
-            "estado": request.form.get("estado", "").strip(),
-            "cliente": request.form.get("cliente", "").strip(),
-            "telefono": request.form.get("telefono", "").strip(),
-            "destino": request.form.get("destino", "").strip(),
-            "patente": request.form.get("patente", "").strip(),
-            "conductor": request.form.get("conductor", "").strip(),
-            "pioneta": request.form.get("pioneta", "").strip(),
+            "estado": estado,
             "monto": money_to_float(request.form.get("monto")),
         }
 
@@ -1303,13 +1251,11 @@ def edit_despacho(despacho_id):
 
         execute("""
             UPDATE despachos
-            SET numero_documento=?, tipo_documento=?, estado=?, cliente=?, telefono=?, destino=?,
-                patente=?, conductor=?, pioneta=?, monto=?, updated_at=?
+            SET numero_documento=?, tipo_documento=?, estado=?, monto=?, updated_at=?
             WHERE id=?
         """, (
-            new_data["numero_documento"], new_data["tipo_documento"], new_data["estado"], new_data["cliente"],
-            new_data["telefono"], new_data["destino"], new_data["patente"], new_data["conductor"],
-            new_data["pioneta"], new_data["monto"], now_str(), despacho_id
+            new_data["numero_documento"], new_data["tipo_documento"], new_data["estado"],
+            new_data["monto"], now_str(), despacho_id
         ))
         flash("Despacho actualizado correctamente.", "success")
         return redirect(url_for("despachos"))
@@ -1340,16 +1286,6 @@ def edit_despacho(despacho_id):
                 </div>
                 <div><label>Monto</label><input name="monto" value="{{ despacho.monto }}"></div>
             </div>
-            <div class="form-row" style="margin-top:14px;">
-                <div><label>Cliente</label><input name="cliente" value="{{ despacho.cliente }}" required></div>
-                <div><label>Teléfono</label><input name="telefono" value="{{ despacho.telefono }}"></div>
-                <div><label>Destino</label><input name="destino" value="{{ despacho.destino }}"></div>
-                <div><label>Patente</label><input name="patente" value="{{ despacho.patente }}"></div>
-            </div>
-            <div class="form-row-2" style="margin-top:14px;">
-                <div><label>Conductor</label><input name="conductor" value="{{ despacho.conductor }}"></div>
-                <div><label>Pioneta</label><input name="pioneta" value="{{ despacho.pioneta }}"></div>
-            </div>
             <div class="actions">
                 <button class="btn btn-primary">Guardar cambios</button>
                 <a class="btn btn-secondary" href="{{ url_for('despachos') }}">Volver</a>
@@ -1357,7 +1293,6 @@ def edit_despacho(despacho_id):
         </form>
     </div>
     """, despacho=despacho, estados=estados, tipos=tipos)
-
 
 # ============================================================
 # CONSULTA
@@ -1369,21 +1304,17 @@ def edit_despacho(despacho_id):
 def consulta():
     q = request.args.get("q", "").strip()
     estado = request.args.get("estado", "").strip()
-    patente = request.args.get("patente", "").strip()
     desde = request.args.get("desde", "").strip()
     hasta = request.args.get("hasta", "").strip()
 
     wheres = []
     params = []
     if q:
-        wheres.append("(numero_documento LIKE ? OR cliente LIKE ? OR destino LIKE ? OR conductor LIKE ?)")
-        params += [f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"]
+        wheres.append("(numero_documento LIKE ? OR tipo_documento LIKE ? OR usuario_nombre LIKE ?)")
+        params += [f"%{q}%", f"%{q}%", f"%{q}%"]
     if estado:
         wheres.append("estado = ?")
         params.append(estado)
-    if patente:
-        wheres.append("patente LIKE ?")
-        params.append(f"%{patente}%")
     if desde:
         wheres.append("date(created_at) >= date(?)")
         params.append(desde)
@@ -1398,13 +1329,13 @@ def consulta():
         ORDER BY id DESC
         LIMIT 500
     """, params)
-    estados = get_config_list("estados_despacho")
+    estados = ["Entregado", "Pendiente"]
 
     return render_page("Consulta", r"""
     <div class="page-head">
         <div>
             <h1>Consulta</h1>
-            <p>Vista de búsqueda y revisión de historial. Los usuarios normales pueden consultar sin modificar.</p>
+            <p>Búsqueda de registros rápidos de despacho. Vista simple para operación.</p>
         </div>
     </div>
 
@@ -1413,7 +1344,7 @@ def consulta():
             <div class="form-row">
                 <div>
                     <label>Buscar</label>
-                    <input name="q" value="{{ request.args.get('q','') }}" placeholder="Documento, cliente, destino, conductor">
+                    <input name="q" value="{{ request.args.get('q','') }}" placeholder="Documento, tipo o usuario">
                 </div>
                 <div>
                     <label>Estado</label>
@@ -1425,26 +1356,20 @@ def consulta():
                     </select>
                 </div>
                 <div>
-                    <label>Patente</label>
-                    <input name="patente" value="{{ request.args.get('patente','') }}">
-                </div>
-                <div>
                     <label>Fecha desde</label>
                     <input type="date" name="desde" value="{{ request.args.get('desde','') }}">
                 </div>
-            </div>
-            <div class="form-row-2" style="margin-top:14px;">
                 <div>
                     <label>Fecha hasta</label>
                     <input type="date" name="hasta" value="{{ request.args.get('hasta','') }}">
                 </div>
-                <div class="actions" style="margin-top:24px;">
-                    <button class="btn btn-primary">Filtrar</button>
-                    <a class="btn btn-secondary" href="{{ url_for('consulta') }}">Limpiar</a>
-                    {% if is_admin %}
-                    <a class="btn btn-secondary" href="{{ url_for('export_despachos', q=request.args.get('q',''), estado=request.args.get('estado',''), patente=request.args.get('patente',''), desde=request.args.get('desde',''), hasta=request.args.get('hasta','')) }}">Exportar resultado</a>
-                    {% endif %}
-                </div>
+            </div>
+            <div class="actions">
+                <button class="btn btn-primary">Filtrar</button>
+                <a class="btn btn-secondary" href="{{ url_for('consulta') }}">Limpiar</a>
+                {% if is_admin %}
+                <a class="btn btn-secondary" href="{{ url_for('export_despachos', q=request.args.get('q',''), estado=request.args.get('estado',''), desde=request.args.get('desde',''), hasta=request.args.get('hasta','')) }}">Exportar resultado</a>
+                {% endif %}
             </div>
         </form>
     </div>
@@ -1454,31 +1379,24 @@ def consulta():
         <div class="table-wrap">
             <table>
                 <tr>
-                    <th>ID</th><th>Documento</th><th>Estado</th><th>Cliente</th><th>Teléfono</th>
-                    <th>Destino</th><th>Patente</th><th>Conductor</th><th>Monto</th><th>Usuario</th><th>Fecha</th>
+                    <th>ID</th><th>Documento</th><th>Estado</th><th>Monto</th><th>Usuario</th><th>Fecha</th>
                 </tr>
                 {% for d in rows %}
                 <tr>
                     <td>{{ d.id }}</td>
                     <td>{{ d.tipo_documento }} {{ d.numero_documento }}</td>
                     <td><span class="badge {% if d.estado == 'Entregado' %}ok{% elif d.estado == 'Pendiente' %}warn{% else %}info{% endif %}">{{ d.estado }}</span></td>
-                    <td>{{ d.cliente }}</td>
-                    <td>{{ d.telefono }}</td>
-                    <td>{{ d.destino }}</td>
-                    <td>{{ d.patente }}</td>
-                    <td>{{ d.conductor }}</td>
                     <td>{{ d.monto|money }}</td>
                     <td>{{ d.usuario_nombre }}</td>
                     <td>{{ d.created_at }}</td>
                 </tr>
                 {% else %}
-                <tr><td colspan="11" class="muted">Sin resultados.</td></tr>
+                <tr><td colspan="6" class="muted">Sin resultados.</td></tr>
                 {% endfor %}
             </table>
         </div>
     </div>
     """, rows=rows, estados=estados, request=request, is_admin=is_admin())
-
 
 # ============================================================
 # MANTENCIONES
@@ -2622,15 +2540,39 @@ def exportar():
 @login_required
 @permission_required("consulta")
 def export_despachos():
-    rows = query_all("SELECT * FROM despachos ORDER BY id DESC")
-    columns = [
-        ("id", "ID"), ("numero_documento", "Número documento"), ("tipo_documento", "Tipo documento"),
-        ("estado", "Estado"), ("cliente", "Cliente"), ("telefono", "Teléfono"), ("destino", "Destino"),
-        ("patente", "Patente"), ("conductor", "Conductor"), ("pioneta", "Pioneta"), ("monto", "Monto"),
-        ("usuario_nombre", "Usuario"), ("created_at", "Creado"), ("updated_at", "Actualizado")
-    ]
-    return excel_response(f"despachos_{today_str()}.xlsx", "Despachos", columns, rows)
+    q = request.args.get("q", "").strip()
+    estado = request.args.get("estado", "").strip()
+    desde = request.args.get("desde", "").strip()
+    hasta = request.args.get("hasta", "").strip()
 
+    wheres = []
+    params = []
+    if q:
+        wheres.append("(numero_documento LIKE ? OR tipo_documento LIKE ? OR usuario_nombre LIKE ?)")
+        params += [f"%{q}%", f"%{q}%", f"%{q}%"]
+    if estado:
+        wheres.append("estado = ?")
+        params.append(estado)
+    if desde:
+        wheres.append("date(created_at) >= date(?)")
+        params.append(desde)
+    if hasta:
+        wheres.append("date(created_at) <= date(?)")
+        params.append(hasta)
+
+    where_sql = "WHERE " + " AND ".join(wheres) if wheres else ""
+    rows = query_all(f"SELECT * FROM despachos {where_sql} ORDER BY id DESC", params)
+    columns = [
+        ("id", "ID"),
+        ("numero_documento", "Número documento"),
+        ("tipo_documento", "Tipo documento"),
+        ("estado", "Estado"),
+        ("monto", "Monto"),
+        ("usuario_nombre", "Usuario"),
+        ("created_at", "Creado"),
+        ("updated_at", "Actualizado"),
+    ]
+    return excel_response(f"despachos_rapidos_{today_str()}.xlsx", "Despachos", columns, rows)
 
 @app.route("/export/mantenciones")
 @login_required
