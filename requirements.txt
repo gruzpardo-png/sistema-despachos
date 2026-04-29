@@ -1,50 +1,6 @@
-# Sistema de entregas y retiros - Ferretería San Pedro v3
-
-Versión web profesional para registrar documentos entregados/retirados o pendientes.
-
-## Mejoras v3
-
-- Logo real de Ferretería San Pedro en el banner superior y login.
-- Hojas/páginas separadas: Despachos, Dashboard, Consultas y Usuarios.
-- Hoja de Despachos con formulario + tabla visible de registros.
-- Hoja de Consultas con filtros completos y exportación Excel.
-- Dashboard operativo con resumen diario, mensual, auditoría y actividad por usuario.
-- Eliminado `Nota de Venta` de los tipos de documento.
-- Eliminado `En Ruta` de estados iniciales.
-- Agregado `Monto documento`.
-- Eliminada la variable `Dirección`.
-- Usuario fijo desde la sesión, sin elegirlo manualmente en cada registro.
-- Patente queda limpia, sin texto de opcional.
-- Compatible con SQLite local y PostgreSQL en Render.
-
-## Prueba local
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python app.py
-```
-
-Abrir: http://localhost:5000
-
-Usuario inicial local:
-
-- usuario: `admin`
-- clave: `admin123`
-
-En Render debes cambiar `ADMIN_PASSWORD`.
-
-## Render
-
-Build command:
-
-```bash
-pip install -r requirements.txt
-```
-
-Start command:
-
-```bash
-gunicorn app:app
-```
+Flask==3.0.3
+Flask-SQLAlchemy==3.1.1
+gunicorn==22.0.0
+psycopg2-binary==2.9.9
+openpyxl==3.1.5
+Werkzeug==3.0.3
