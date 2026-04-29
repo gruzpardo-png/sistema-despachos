@@ -1,11 +1,6 @@
-document.addEventListener('DOMContentLoaded', () => {
-  const first = document.querySelector('input[name="doc_number"]');
-  if (first) first.focus();
-  document.querySelectorAll('.cancel-form').forEach(form => {
-    form.addEventListener('submit', (event) => {
-      const reason = form.querySelector('input[name="cancelled_reason"]')?.value.trim();
-      if (!reason) return;
-      if (!confirm('¿Seguro que quieres anular este registro?')) event.preventDefault();
-    });
-  });
-});
+Flask==3.0.3
+Flask-SQLAlchemy==3.1.1
+gunicorn==22.0.0
+psycopg2-binary==2.9.9
+openpyxl==3.1.5
+Werkzeug==3.0.3
