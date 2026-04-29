@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Despachos | Ferretería San Pedro{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  {% if current_user %}
+  <header class="topbar">
+    <a class="brand" href="{{ url_for('despachos') }}" aria-label="Ferretería San Pedro">
+      <img class="brand-logo" src="{{ url_for('static', filename='logo.png') }}" alt="Ferretería San Pedro">
+      <div>
+        <strong>Ferretería San Pedro</strong>
+        <span>Sistema profesional de entregas y retiros</span>
+      </div>
+    </a>
+    <nav class="nav">
+      <a href="{{ url_for('despachos') }}">Despachos</a>
+      <a href="{{ url_for('dashboard') }}">Dashboard</a>
+      <a href="{{ url_for('consultas') }}">Consultas</a>
+      {% if current_user.role == 'ADMIN' %}<a href="{{ url_for('users') }}">Usuarios</a>{% endif %}
+      <span class="user-pill">{{ current_user.name }} · {{ current_user.role }}</span>
+      <a class="danger-link" href="{{ url_for('logout') }}">Salir</a>
+    </nav>
+  </header>
+  {% endif %}
+  <main class="page">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}<div class="flash-wrap">{% for category, message in messages %}<div class="flash {{ category }}">{{ message }}</div>{% endfor %}</div>{% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
