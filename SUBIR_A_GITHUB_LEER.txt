@@ -1,24 +1,4 @@
-IMPORTANTE PARA RENDER
-
-Sube estos archivos directamente en la raíz del repositorio GitHub:
-
-app.py
-requirements.txt
-render.yaml
-Procfile
-README.md
-.gitignore
-VERSION.txt
-
-NO pegues el contenido de .gitignore dentro de app.py.
-El archivo app.py debe empezar con:
-
-import os
-import shutil
-import json
-
-Si app.py empieza con "__pycache__/", está malo: eso es el contenido de .gitignore.
-
-Para conservar datos:
-DATABASE_PATH=/data/ferreteria_cloud_tool.db
-Disk Render mount path: /data
+Flask==3.0.3
+Werkzeug==3.0.3
+openpyxl==3.1.5
+gunicorn==22.0.0
