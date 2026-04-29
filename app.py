@@ -3,8 +3,13 @@ import os
 import shutil
 import json
 import sqlite3
+import base64
+import re
+import mimetypes
+import unicodedata
 from io import BytesIO
 from datetime import datetime, date
+from zoneinfo import ZoneInfo
 from functools import wraps
 
 from flask import (
@@ -13,29 +18,38 @@ from flask import (
 )
 from markupsafe import Markup
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 from openpyxl import Workbook
 
 
 APP_NAME = "Ferretería Cloud Tool"
-APP_VERSION = "v4.3 Modern Login"
+APP_VERSION = "v4.4 Ventas IA Elias"
 DB_PATH = os.environ.get("DATABASE_PATH", "ferreteria_cloud_tool.db")
 SECRET_KEY = os.environ.get("SECRET_KEY", "cambiar-esta-clave-en-render")
 
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
+app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024
 
 
 # ============================================================
 # UTILIDADES BASE
 # ============================================================
 
+CHILE_TZ = ZoneInfo("America/Santiago")
+
+
+def chile_now():
+    return datetime.now(CHILE_TZ)
+
+
 def now_str():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return chile_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def today_str():
-    return date.today().isoformat()
+    return chile_now().date().isoformat()
 
 
 def database_directory():
@@ -137,6 +151,15 @@ def money(value):
     return "$" + f"{number:,.0f}".replace(",", ".")
 
 
+@app.template_filter("percent")
+def percent(value):
+    try:
+        number = float(value or 0)
+    except Exception:
+        number = 0
+    return f"{number * 100:.1f}%".replace(".", ",")
+
+
 @app.template_filter("date_short")
 def date_short(value):
     if not value:
@@ -181,6 +204,555 @@ def set_config_list(clave, values):
         VALUES (?, ?, ?)
         ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor, updated_at = excluded.updated_at
     """, (clave, json.dumps(clean, ensure_ascii=False), now_str()))
+
+
+# ============================================================
+# UTILIDADES PRODUCTOS / VENTAS / IA
+# ============================================================
+
+def iva_rate():
+    raw = os.environ.get("IVA_RATE", "0.19")
+    try:
+        return float(str(raw).replace(",", "."))
+    except Exception:
+        return 0.19
+
+
+def openai_model_name():
+    # Configurable desde Render. Usa el modelo exacto que tenga disponible tu cuenta.
+    return os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
+
+
+def openai_is_configured():
+    return bool(os.environ.get("OPENAI_API_KEY"))
+
+
+def normalize_text(value):
+    value = "" if value is None else str(value)
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(c for c in value if not unicodedata.combining(c))
+    value = value.upper()
+    value = re.sub(r"[^A-Z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def parse_number(value, default=0.0):
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return default
+    text = text.replace("$", "").replace(" ", "").replace("\xa0", "")
+    # Formato chileno usual: 1.989,68
+    if "," in text:
+        text = text.replace(".", "").replace(",", ".")
+    else:
+        # Si viene 1,989 desde un sistema anglo, elimina separador miles.
+        if text.count(".") > 1:
+            parts = text.split(".")
+            text = "".join(parts[:-1]) + "." + parts[-1]
+    try:
+        return float(text)
+    except Exception:
+        return default
+
+
+def parse_bool_si(value):
+    text = normalize_text(value)
+    return 1 if text in {"SI", "S", "YES", "TRUE", "1", "ACTIVO", "ACTIVA"} else 0
+
+
+def parse_quantity(value, default=1.0):
+    qty = parse_number(value, default)
+    if qty <= 0:
+        return default
+    return qty
+
+
+def venta_neta_desde_bruto(precio_bruto):
+    return float(precio_bruto or 0) / (1 + iva_rate())
+
+
+def contribucion_unitaria(precio_compra_neto, precio_venta_bruto):
+    return venta_neta_desde_bruto(precio_venta_bruto) - float(precio_compra_neto or 0)
+
+
+def margen_pct(precio_compra_neto, precio_venta_bruto):
+    venta_neta = venta_neta_desde_bruto(precio_venta_bruto)
+    if venta_neta <= 0:
+        return 0
+    return contribucion_unitaria(precio_compra_neto, precio_venta_bruto) / venta_neta
+
+
+def tokenize_search(text):
+    stop = {
+        "DE", "DEL", "LA", "EL", "LOS", "LAS", "PARA", "POR", "CON", "UN", "UNA",
+        "UNIDAD", "UNIDADES", "UND", "UD", "U", "X", "NECESITO", "QUIERO", "DAME",
+        "COTIZAR", "COTIZACION", "COTIZACIÓN", "LISTA", "PRODUCTO", "PRODUCTOS"
+    }
+    tokens = [t for t in normalize_text(text).split() if len(t) >= 2 and t not in stop]
+    # Evita queries demasiado grandes.
+    return tokens[:8]
+
+
+def producto_por_codigo(codigo):
+    if not codigo:
+        return None
+    return query_one("""
+        SELECT * FROM productos
+        WHERE codigo_producto = ?
+        LIMIT 1
+    """, (str(codigo).strip(),))
+
+
+def buscar_producto_local(descripcion="", codigo_producto=None):
+    codigo = str(codigo_producto or "").strip()
+    if codigo:
+        exact = producto_por_codigo(codigo)
+        if exact:
+            return exact, 100
+
+        like = query_one("""
+            SELECT * FROM productos
+            WHERE codigo_producto LIKE ?
+            ORDER BY activo DESC, stock DESC
+            LIMIT 1
+        """, (f"%{codigo}%",))
+        if like:
+            return like, 82
+
+    tokens = tokenize_search(descripcion)
+    if not tokens:
+        return None, 0
+
+    # Primero busca coincidencia AND para máxima precisión.
+    clauses = ["activo = 1"]
+    params = []
+    for t in tokens[:5]:
+        clauses.append("descripcion_busqueda LIKE ?")
+        params.append(f"%{t}%")
+    rows = query_all(f"""
+        SELECT * FROM productos
+        WHERE {' AND '.join(clauses)}
+        ORDER BY stock DESC, precio_venta_bruto DESC
+        LIMIT 50
+    """, params)
+
+    # Si AND no encuentra, prueba OR.
+    if not rows:
+        clauses = ["activo = 1 AND (" + " OR ".join(["descripcion_busqueda LIKE ?" for _ in tokens[:5]]) + ")"]
+        params = [f"%{t}%" for t in tokens[:5]]
+        rows = query_all(f"""
+            SELECT * FROM productos
+            WHERE {' AND '.join(clauses)}
+            ORDER BY stock DESC, precio_venta_bruto DESC
+            LIMIT 80
+        """, params)
+
+    if not rows:
+        return None, 0
+
+    query_norm = normalize_text(descripcion)
+    best = None
+    best_score = -1
+    for row in rows:
+        desc_norm = row["descripcion_busqueda"] or normalize_text(row["descripcion"])
+        score = 0
+        if query_norm and query_norm in desc_norm:
+            score += 40
+        for t in tokens:
+            if t in desc_norm:
+                score += 10
+        try:
+            if float(row["stock"] or 0) > 0:
+                score += 4
+        except Exception:
+            pass
+        if row["activo"]:
+            score += 3
+        if score > best_score:
+            best = row
+            best_score = score
+
+    return best, best_score
+
+
+def extraer_items_local(texto):
+    """
+    Fallback sin IA. Intenta convertir líneas de texto en productos/cantidades.
+    """
+    items = []
+    raw = texto or ""
+    lines = []
+    for chunk in re.split(r"[\n;]+", raw):
+        chunk = chunk.strip(" -•\t")
+        if chunk:
+            lines.append(chunk)
+
+    if not lines and raw.strip():
+        lines = [raw.strip()]
+
+    for line in lines:
+        qty = 1.0
+        product_text = line
+
+        # 3 x cemento / 3 unidades cemento / cemento x 3
+        m = re.search(r"^\s*(\d+(?:[,.]\d+)?)\s*(?:X|x|UN|UND|UDS|UNIDADES|UNIDAD)?\s+(.+)$", line)
+        if m:
+            qty = parse_quantity(m.group(1), 1)
+            product_text = m.group(2).strip()
+        else:
+            m = re.search(r"(.+?)\s+(?:X|x)\s*(\d+(?:[,.]\d+)?)\s*$", line)
+            if m:
+                product_text = m.group(1).strip()
+                qty = parse_quantity(m.group(2), 1)
+
+        if product_text:
+            items.append({
+                "codigo_producto": None,
+                "descripcion": product_text,
+                "cantidad": qty,
+                "observacion": "extracción local"
+            })
+
+    return {"items": items, "notas": "Extracción local sin IA"}
+
+
+def imagen_a_data_url(file_storage):
+    if not file_storage or not file_storage.filename:
+        return None
+    raw = file_storage.read()
+    if not raw:
+        return None
+    if len(raw) > 12 * 1024 * 1024:
+        raise ValueError("La imagen supera el tamaño máximo permitido de 12 MB.")
+    mime = file_storage.mimetype or mimetypes.guess_type(file_storage.filename)[0] or "image/jpeg"
+    encoded = base64.b64encode(raw).decode("utf-8")
+    return f"data:{mime};base64,{encoded}"
+
+
+def extraer_json_desde_respuesta(raw):
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(raw[start:end + 1])
+        except Exception:
+            return None
+    return None
+
+
+def extraer_items_con_elias(texto, imagen_file=None):
+    """
+    Usa OpenAI Responses API si está configurada; si falla, usa fallback local.
+    """
+    data_url = None
+    if imagen_file and imagen_file.filename:
+        data_url = imagen_a_data_url(imagen_file)
+
+    if not openai_is_configured():
+        return extraer_items_local(texto), "local", "OPENAI_API_KEY no configurada"
+
+    try:
+        from openai import OpenAI
+        client = OpenAI()
+
+        system_prompt = (
+            "Eres Elias, asistente de ventas de Ferretería Cloud Tool. "
+            "Tu única tarea es extraer productos y cantidades desde texto o imagen de listas de materiales. "
+            "Devuelve SOLO JSON válido, sin markdown, con esta estructura: "
+            "{\"items\":[{\"codigo_producto\":null,\"descripcion\":\"texto producto\",\"cantidad\":1,\"observacion\":\"\"}],\"notas\":\"\"}. "
+            "No inventes códigos. Si no hay cantidad clara, usa 1. "
+            "No calcules precios; el sistema calculará precios desde la maestra de productos."
+        )
+
+        user_text = (
+            "Extrae los productos requeridos desde esta solicitud de cliente. "
+            "Respeta cantidades. Solicitud:\n\n" + (texto or "")
+        )
+
+        user_content = [{"type": "input_text", "text": user_text}]
+        if data_url:
+            user_content.append({"type": "input_image", "image_url": data_url})
+
+        response = client.responses.create(
+            model=openai_model_name(),
+            input=[
+                {"role": "developer", "content": [{"type": "input_text", "text": system_prompt}]},
+                {"role": "user", "content": user_content},
+            ],
+            max_output_tokens=2000,
+        )
+
+        raw = getattr(response, "output_text", None)
+        if raw is None:
+            raw = str(response)
+
+        data = extraer_json_desde_respuesta(raw)
+        if not data or "items" not in data:
+            return extraer_items_local(texto), "local", f"No se pudo interpretar JSON de Elias. Respuesta parcial: {raw[:500]}"
+
+        return data, "openai", raw
+
+    except Exception as exc:
+        return extraer_items_local(texto), "local", f"Error IA: {exc}"
+
+
+def generar_numero_cotizacion(cotizacion_id):
+    return f"COT-{today_str().replace('-', '')}-{int(cotizacion_id):06d}"
+
+
+def crear_cotizacion_desde_items(cliente, telefono, texto_original, items_extraidos, fuente, ai_raw):
+    user = current_user()
+    now = now_str()
+
+    cot_id = insert_and_get_id("""
+        INSERT INTO cotizaciones (
+            numero, cliente, telefono, texto_original, fuente, ai_raw,
+            subtotal_bruto, venta_neta_total, costo_neto_total, contribucion_total, margen_total_pct,
+            estado, usuario_id, usuario_nombre, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 'Generada', ?, ?, ?, ?)
+    """, (
+        "PENDIENTE",
+        cliente.strip() if cliente else "",
+        telefono.strip() if telefono else "",
+        texto_original or "",
+        fuente,
+        ai_raw or "",
+        user["id"] if user else None,
+        user["full_name"] if user else "Sistema",
+        now,
+        now,
+    ))
+
+    numero = generar_numero_cotizacion(cot_id)
+    execute("UPDATE cotizaciones SET numero = ? WHERE id = ?", (numero, cot_id))
+
+    subtotal_bruto = 0.0
+    venta_neta_total = 0.0
+    costo_neto_total = 0.0
+    contrib_total = 0.0
+    items_guardados = 0
+
+    for item in items_extraidos:
+        descripcion_solicitada = str(item.get("descripcion") or item.get("producto") or "").strip()
+        codigo_solicitado = item.get("codigo_producto") or item.get("codigo")
+        cantidad = parse_quantity(item.get("cantidad"), 1)
+
+        producto, score = buscar_producto_local(descripcion_solicitada, codigo_solicitado)
+
+        if producto:
+            codigo = producto["codigo_producto"]
+            descripcion = producto["descripcion"]
+            compra = float(producto["precio_compra_neto"] or 0)
+            venta_bruto = float(producto["precio_venta_bruto"] or 0)
+            stock = float(producto["stock"] or 0)
+            encontrado = 1
+            obs = item.get("observacion") or f"Match score {score}"
+        else:
+            codigo = str(codigo_solicitado or "")
+            descripcion = descripcion_solicitada or "Producto no identificado"
+            compra = 0.0
+            venta_bruto = 0.0
+            stock = 0.0
+            encontrado = 0
+            obs = "No encontrado en maestra de productos"
+
+        venta_neta_unit = venta_neta_desde_bruto(venta_bruto)
+        contrib_unit = venta_neta_unit - compra
+        subtotal_item = venta_bruto * cantidad
+        venta_neta_item = venta_neta_unit * cantidad
+        costo_item = compra * cantidad
+        contrib_item = contrib_unit * cantidad
+        margen_item = (contrib_unit / venta_neta_unit) if venta_neta_unit > 0 else 0
+
+        execute("""
+            INSERT INTO cotizacion_items (
+                cotizacion_id, codigo_producto, descripcion_solicitada, descripcion_producto,
+                cantidad, precio_compra_neto, precio_venta_bruto, venta_neta_unitaria,
+                stock, subtotal_bruto, costo_neto_total, contribucion_total, margen_pct,
+                encontrado, observacion, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            cot_id, codigo, descripcion_solicitada, descripcion, cantidad,
+            compra, venta_bruto, venta_neta_unit, stock, subtotal_item, costo_item,
+            contrib_item, margen_item, encontrado, obs, now
+        ))
+
+        subtotal_bruto += subtotal_item
+        venta_neta_total += venta_neta_item
+        costo_neto_total += costo_item
+        contrib_total += contrib_item
+        items_guardados += 1
+
+    margen_total = (contrib_total / venta_neta_total) if venta_neta_total > 0 else 0
+
+    execute("""
+        UPDATE cotizaciones
+        SET subtotal_bruto=?, venta_neta_total=?, costo_neto_total=?, contribucion_total=?,
+            margen_total_pct=?, updated_at=?
+        WHERE id=?
+    """, (subtotal_bruto, venta_neta_total, costo_neto_total, contrib_total, margen_total, now_str(), cot_id))
+
+    write_audit("ventas", "crear_cotizacion", cot_id, "items", "", f"{items_guardados} productos")
+    return cot_id
+
+
+def header_index_map(headers):
+    return {normalize_text(h): idx for idx, h in enumerate(headers) if h is not None}
+
+
+def find_col(index_map, aliases):
+    for alias in aliases:
+        key = normalize_text(alias)
+        if key in index_map:
+            return index_map[key]
+    return None
+
+
+def procesar_excel_productos(file_storage):
+    from openpyxl import load_workbook
+
+    filename = secure_filename(file_storage.filename or "productos.xlsx")
+    backup_database_if_exists("pre_import_productos")
+
+    wb = load_workbook(file_storage, read_only=True, data_only=True)
+    ws = wb.active
+
+    rows = ws.iter_rows(values_only=True)
+    headers = next(rows, None)
+    if not headers:
+        raise ValueError("El archivo no tiene encabezados.")
+
+    idx = header_index_map(headers)
+
+    col_codigo = find_col(idx, ["Código Producto", "Codigo Producto", "Codigo", "Código", "SKU"])
+    col_desc = find_col(idx, ["Descripción", "Descripcion", "Nombre Producto", "Producto"])
+    col_compra = find_col(idx, ["Precio Compra Neto", "Compra Neto", "Costo Neto", "Precio Costo Neto"])
+    col_venta_bruto = find_col(idx, ["Precio Venta Bruto", "Venta Bruto", "Precio Bruto", "Precio Venta"])
+    col_venta_neto = find_col(idx, ["Precio Venta Neto", "Venta Neto"])
+    col_stock = find_col(idx, ["Stock", "Existencia", "Inventario"])
+    col_activo = find_col(idx, ["Activo", "Activa", "Estado"])
+
+    missing = []
+    if col_codigo is None: missing.append("Código Producto")
+    if col_desc is None: missing.append("Descripción")
+    if col_compra is None: missing.append("Precio Compra Neto")
+    if col_venta_bruto is None and col_venta_neto is None: missing.append("Precio Venta Bruto o Precio Venta Neto")
+    if col_stock is None: missing.append("Stock")
+    if col_activo is None: missing.append("Activo")
+
+    if missing:
+        raise ValueError("Faltan columnas obligatorias: " + ", ".join(missing))
+
+    user = current_user()
+    import_id = insert_and_get_id("""
+        INSERT INTO producto_importaciones (
+            archivo_nombre, total_filas, creados, actualizados, errores,
+            usuario_id, usuario_nombre, created_at, observaciones
+        )
+        VALUES (?, 0, 0, 0, 0, ?, ?, ?, ?)
+    """, (
+        filename,
+        user["id"] if user else None,
+        user["full_name"] if user else "Sistema",
+        now_str(),
+        "Importación iniciada"
+    ))
+
+    total = creados = actualizados = errores = 0
+    now = now_str()
+    conn = db()
+    try:
+        for row_num, row in enumerate(rows, start=2):
+            total += 1
+            try:
+                codigo = str(row[col_codigo]).strip() if row[col_codigo] is not None else ""
+                descripcion = str(row[col_desc]).strip() if row[col_desc] is not None else ""
+
+                if not codigo or not descripcion:
+                    raise ValueError("Código Producto y Descripción son obligatorios.")
+
+                compra = parse_number(row[col_compra], 0)
+                if col_venta_bruto is not None:
+                    venta_bruto = parse_number(row[col_venta_bruto], 0)
+                else:
+                    venta_neto = parse_number(row[col_venta_neto], 0)
+                    venta_bruto = venta_neto * (1 + iva_rate())
+
+                stock = parse_number(row[col_stock], 0)
+                activo = parse_bool_si(row[col_activo])
+
+                exists = conn.execute("SELECT id FROM productos WHERE codigo_producto = ?", (codigo,)).fetchone()
+                if exists:
+                    actualizados += 1
+                else:
+                    creados += 1
+
+                conn.execute("""
+                    INSERT INTO productos (
+                        codigo_producto, descripcion, descripcion_busqueda, precio_compra_neto,
+                        precio_venta_bruto, stock, activo, ultima_importacion_id, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(codigo_producto) DO UPDATE SET
+                        descripcion = excluded.descripcion,
+                        descripcion_busqueda = excluded.descripcion_busqueda,
+                        precio_compra_neto = excluded.precio_compra_neto,
+                        precio_venta_bruto = excluded.precio_venta_bruto,
+                        stock = excluded.stock,
+                        activo = excluded.activo,
+                        ultima_importacion_id = excluded.ultima_importacion_id,
+                        updated_at = excluded.updated_at
+                """, (
+                    codigo, descripcion, normalize_text(descripcion), compra, venta_bruto,
+                    stock, activo, import_id, now, now
+                ))
+
+            except Exception as exc:
+                errores += 1
+                conn.execute("""
+                    INSERT INTO producto_importacion_errores (
+                        importacion_id, fila, codigo_producto, error, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    import_id,
+                    row_num,
+                    "" if not row or col_codigo is None or col_codigo >= len(row) else str(row[col_codigo] or ""),
+                    str(exc)[:500],
+                    now_str()
+                ))
+
+        conn.execute("""
+            UPDATE producto_importaciones
+            SET total_filas=?, creados=?, actualizados=?, errores=?, observaciones=?
+            WHERE id=?
+        """, (total, creados, actualizados, errores, "Importación finalizada", import_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+    write_audit("productos", "importar_excel", import_id, "archivo", "", f"{filename}: {total} filas")
+    return {
+        "import_id": import_id,
+        "archivo": filename,
+        "total": total,
+        "creados": creados,
+        "actualizados": actualizados,
+        "errores": errores,
+    }
 
 
 # ============================================================
@@ -314,6 +886,98 @@ def init_db():
     )
     """)
 
+
+    execute("""
+    CREATE TABLE IF NOT EXISTS productos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        codigo_producto TEXT UNIQUE NOT NULL,
+        descripcion TEXT NOT NULL,
+        descripcion_busqueda TEXT,
+        precio_compra_neto REAL DEFAULT 0,
+        precio_venta_bruto REAL DEFAULT 0,
+        stock REAL DEFAULT 0,
+        activo INTEGER DEFAULT 1,
+        ultima_importacion_id INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT
+    )
+    """)
+
+    execute("""
+    CREATE TABLE IF NOT EXISTS producto_importaciones (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        archivo_nombre TEXT,
+        total_filas INTEGER DEFAULT 0,
+        creados INTEGER DEFAULT 0,
+        actualizados INTEGER DEFAULT 0,
+        errores INTEGER DEFAULT 0,
+        usuario_id INTEGER,
+        usuario_nombre TEXT,
+        created_at TEXT NOT NULL,
+        observaciones TEXT
+    )
+    """)
+
+    execute("""
+    CREATE TABLE IF NOT EXISTS producto_importacion_errores (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        importacion_id INTEGER,
+        fila INTEGER,
+        codigo_producto TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL
+    )
+    """)
+
+    execute("""
+    CREATE TABLE IF NOT EXISTS cotizaciones (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        numero TEXT UNIQUE,
+        cliente TEXT,
+        telefono TEXT,
+        texto_original TEXT,
+        fuente TEXT,
+        ai_raw TEXT,
+        subtotal_bruto REAL DEFAULT 0,
+        venta_neta_total REAL DEFAULT 0,
+        costo_neto_total REAL DEFAULT 0,
+        contribucion_total REAL DEFAULT 0,
+        margen_total_pct REAL DEFAULT 0,
+        estado TEXT DEFAULT 'Generada',
+        usuario_id INTEGER,
+        usuario_nombre TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT
+    )
+    """)
+
+    execute("""
+    CREATE TABLE IF NOT EXISTS cotizacion_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cotizacion_id INTEGER NOT NULL,
+        codigo_producto TEXT,
+        descripcion_solicitada TEXT,
+        descripcion_producto TEXT,
+        cantidad REAL DEFAULT 1,
+        precio_compra_neto REAL DEFAULT 0,
+        precio_venta_bruto REAL DEFAULT 0,
+        venta_neta_unitaria REAL DEFAULT 0,
+        stock REAL DEFAULT 0,
+        subtotal_bruto REAL DEFAULT 0,
+        costo_neto_total REAL DEFAULT 0,
+        contribucion_total REAL DEFAULT 0,
+        margen_pct REAL DEFAULT 0,
+        encontrado INTEGER DEFAULT 0,
+        observacion TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(cotizacion_id) REFERENCES cotizaciones(id)
+    )
+    """)
+
+    execute("CREATE INDEX IF NOT EXISTS idx_productos_descripcion_busqueda ON productos(descripcion_busqueda)")
+    execute("CREATE INDEX IF NOT EXISTS idx_cotizaciones_created_at ON cotizaciones(created_at)")
+    execute("CREATE INDEX IF NOT EXISTS idx_cotizacion_items_cotizacion ON cotizacion_items(cotizacion_id)")
+
     # Migraciones tolerantes para bases anteriores.
     migrations = {
         "users": [
@@ -377,6 +1041,32 @@ def init_db():
             except Exception:
                 pass
 
+    # Migraciones de módulos Ventas / Productos.
+    extra_migration_cols = {
+        "productos": [
+            "descripcion_busqueda TEXT",
+            "ultima_importacion_id INTEGER",
+        ],
+        "cotizaciones": [
+            "fuente TEXT",
+            "ai_raw TEXT",
+            "venta_neta_total REAL DEFAULT 0",
+            "costo_neto_total REAL DEFAULT 0",
+            "contribucion_total REAL DEFAULT 0",
+            "margen_total_pct REAL DEFAULT 0",
+        ],
+        "cotizacion_items": [
+            "venta_neta_unitaria REAL DEFAULT 0",
+            "descripcion_solicitada TEXT",
+        ],
+    }
+    for table, cols in extra_migration_cols.items():
+        for col in cols:
+            try:
+                add_column_if_missing(table, col)
+            except Exception:
+                pass
+
     # Configuración inicial.
     defaults = {
         "estados_despacho": ["Entregado", "Pendiente"],
@@ -433,6 +1123,8 @@ def init_db():
                 "despachos": True,
                 "mantenciones": True,
                 "consulta": True,
+                "ventas": True,
+                "productos": False,
                 "exportar": False,
                 "dashboard": False,
                 "auditoria": False,
@@ -448,6 +1140,8 @@ def init_db():
 # ============================================================
 
 PERMISSION_LABELS = {
+    "ventas": "Ventas / Cotización IA",
+    "productos": "Productos / Maestro de precios",
     "despachos": "Despachos",
     "mantenciones": "Mantenciones",
     "consulta": "Consulta",
@@ -583,9 +1277,9 @@ BASE_TEMPLATE = r"""
             justify-content:center;
             padding:24px;
             background:
-                radial-gradient(circle at top left, rgba(45,212,191,.18), transparent 26%),
-                radial-gradient(circle at bottom right, rgba(59,130,246,.18), transparent 28%),
-                linear-gradient(135deg,#081522 0%, #0c2433 45%, #0c4a5a 100%);
+                radial-gradient(circle at 18% 18%, rgba(20,184,166,.22), transparent 28%),
+                radial-gradient(circle at 80% 72%, rgba(59,130,246,.24), transparent 30%),
+                linear-gradient(135deg,#071827 0%, #0f2437 50%, #0e5962 100%);
             position:relative;
             overflow:hidden;
         }
@@ -594,37 +1288,22 @@ BASE_TEMPLATE = r"""
             position:absolute;
             inset:0;
             background:
-                linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
-            background-size:32px 32px;
-            mask-image:linear-gradient(to bottom, rgba(0,0,0,.65), transparent 95%);
-            pointer-events:none;
+                linear-gradient(rgba(255,255,255,.04) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,.04) 1px, transparent 1px);
+            background-size:34px 34px;
+            mask-image:linear-gradient(to bottom, rgba(0,0,0,.75), transparent 95%);
         }
         .login-card{
             width:100%;
-            max-width:460px;
-            background:rgba(8,18,30,.82);
-            border:1px solid rgba(148,163,184,.28);
+            max-width:430px;
+            background:rgba(255,255,255,.92);
+            border:1px solid rgba(255,255,255,.55);
             border-radius:28px;
             padding:34px 30px 24px;
-            box-shadow:0 24px 70px rgba(2,6,23,.45);
-            backdrop-filter: blur(18px);
+            box-shadow:0 24px 70px rgba(2,6,23,.42);
+            backdrop-filter:blur(18px);
             position:relative;
             z-index:1;
-        }
-        .login-card::before{
-            content:"";
-            position:absolute;
-            inset:0;
-            border-radius:28px;
-            padding:1px;
-            background:linear-gradient(135deg, rgba(45,212,191,.55), rgba(96,165,250,.45), rgba(255,255,255,.12));
-            -webkit-mask:
-              linear-gradient(#fff 0 0) content-box,
-              linear-gradient(#fff 0 0);
-            -webkit-mask-composite:xor;
-            mask-composite:exclude;
-            pointer-events:none;
         }
         .topbar{
             background:#0f172a;
@@ -666,6 +1345,7 @@ BASE_TEMPLATE = r"""
         .nav-section.admin{background:rgba(20,184,166,.18);border-color:rgba(45,212,191,.35)}
         .nav-section.control{background:rgba(251,191,36,.15);border-color:rgba(251,191,36,.35)}
         .nav-section.integrations{background:rgba(129,140,248,.17);border-color:rgba(129,140,248,.35)}
+        .nav-section.ventas{background:rgba(14,165,233,.16);border-color:rgba(56,189,248,.35)}
         .nav-label{
             color:#cbd5e1;
             font-size:11px;
@@ -732,7 +1412,6 @@ BASE_TEMPLATE = r"""
             font-weight:700;
             margin-bottom:6px;
             color:#374151;
-            letter-spacing:.01em;
         }
         input,select,textarea{
             width:100%;
@@ -742,12 +1421,6 @@ BASE_TEMPLATE = r"""
             font-size:14px;
             background:white;
             color:#111827;
-            transition:border-color .18s ease, box-shadow .18s ease, background .18s ease;
-        }
-        input:focus,select:focus,textarea:focus{
-            outline:none;
-            border-color:#14b8a6;
-            box-shadow:0 0 0 4px rgba(20,184,166,.12);
         }
         textarea{min-height:96px;resize:vertical}
         .form-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}
@@ -854,6 +1527,35 @@ BASE_TEMPLATE = r"""
             padding:20px;
             color:#475569;
         }
+        .ai-panel{
+            background:
+                radial-gradient(circle at top left, rgba(20,184,166,.18), transparent 24%),
+                linear-gradient(135deg,#071827,#0f172a);
+            color:#e5f8ff;
+            border:1px solid rgba(125,211,252,.25);
+            border-radius:22px;
+            padding:20px;
+            box-shadow:0 18px 50px rgba(15,23,42,.18);
+        }
+        .ai-panel label{color:#cbd5e1}
+        .ai-panel input,.ai-panel textarea{
+            background:rgba(255,255,255,.07);
+            color:#f8fafc;
+            border-color:rgba(148,163,184,.30);
+        }
+        .ai-panel textarea{min-height:160px}
+        .subtle{
+            color:#94a3b8;
+            font-size:13px;
+        }
+        .quote-total{
+            background:#f8fafc;
+            border:1px solid var(--border);
+            border-radius:16px;
+            padding:14px;
+        }
+        .match-ok{color:#047857;font-weight:800}
+        .match-bad{color:#b91c1c;font-weight:800}
         @media (max-width:1000px){
             .form-row,.form-row-3,.form-row-2,.grid-2,.grid-3,.grid-4{grid-template-columns:1fr}
             .topbar{align-items:flex-start;flex-direction:column}
@@ -881,11 +1583,20 @@ BASE_TEMPLATE = r"""
                 {% if has_perm("consulta") %}<a class="nav-link" href="{{ url_for('consulta') }}">Consulta</a>{% endif %}
             </div>
 
+            {% if has_perm("ventas") or has_perm("productos") %}
+            <div class="nav-section ventas">
+                <span class="nav-label">Ventas</span>
+                {% if has_perm("ventas") %}<a class="nav-link" href="{{ url_for('ventas') }}">Cotización Elias</a>{% endif %}
+                {% if has_perm("productos") %}<a class="nav-link" href="{{ url_for('productos') }}">Productos</a>{% endif %}
+            </div>
+            {% endif %}
+
             {% if is_admin %}
             <div class="nav-section admin">
                 <span class="nav-label">Administración</span>
                 <a class="nav-link" href="{{ url_for('administracion') }}">Administración</a>
                 <a class="nav-link" href="{{ url_for('usuarios') }}">Usuarios</a>
+                <a class="nav-link" href="{{ url_for('productos') }}">Productos</a>
                 <a class="nav-link" href="{{ url_for('maquinarias') }}">Maquinarias</a>
                 <a class="nav-link" href="{{ url_for('vehiculos') }}">Vehículos</a>
                 <a class="nav-link" href="{{ url_for('logistica') }}">Conductores</a>
@@ -984,7 +1695,7 @@ def login():
     return render_page("Ingreso", r"""
     <div class="login-bg">
         <div class="login-card">
-            <h1 style="margin:0 0 22px;color:#f8fafc;font-size:34px;line-height:1.05;letter-spacing:-0.03em;">Ferretería Cloud Tool</h1>
+            <h1 style="margin:0 0 22px;color:#0f172a;font-size:34px;line-height:1.05;letter-spacing:-0.03em;">Ferretería Cloud Tool</h1>
 
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
@@ -996,33 +1707,17 @@ def login():
 
             <form method="post">
                 <div style="margin-bottom:14px;">
-                    <label style="color:#cbd5e1;font-size:12px;text-transform:uppercase;letter-spacing:.08em;">Usuario</label>
-                    <input
-                        name="username"
-                        autocomplete="username"
-                        required
-                        style="height:52px;background:rgba(255,255,255,.06);border:1px solid rgba(148,163,184,.28);color:#f8fafc;border-radius:16px;padding:0 16px;"
-                    >
+                    <label>Usuario</label>
+                    <input name="username" autocomplete="username" required>
                 </div>
                 <div style="margin-bottom:16px;">
-                    <label style="color:#cbd5e1;font-size:12px;text-transform:uppercase;letter-spacing:.08em;">Contraseña</label>
-                    <input
-                        type="password"
-                        name="password"
-                        autocomplete="current-password"
-                        required
-                        style="height:52px;background:rgba(255,255,255,.06);border:1px solid rgba(148,163,184,.28);color:#f8fafc;border-radius:16px;padding:0 16px;"
-                    >
+                    <label>Contraseña</label>
+                    <input type="password" name="password" autocomplete="current-password" required>
                 </div>
-                <button
-                    class="btn"
-                    style="width:100%;justify-content:center;height:54px;border-radius:16px;background:linear-gradient(135deg,#14b8a6,#2563eb);color:white;font-size:16px;font-weight:800;box-shadow:0 12px 28px rgba(37,99,235,.28);"
-                >
-                    Ingresar
-                </button>
+                <button class="btn btn-primary" style="width:100%;justify-content:center;height:52px;font-size:16px;">Ingresar</button>
             </form>
 
-            <div style="margin-top:18px;text-align:center;color:rgba(226,232,240,.72);font-size:12px;letter-spacing:.12em;text-transform:uppercase;">
+            <div style="margin-top:18px;text-align:center;color:#64748b;font-size:12px;letter-spacing:.12em;text-transform:uppercase;">
                 RUZ AI Systems
             </div>
         </div>
@@ -2535,6 +3230,472 @@ def auditoria():
     """, rows=rows, modulos=modulos, request=request)
 
 
+
+# ============================================================
+# PRODUCTOS / MAESTRA DE PRECIOS
+# ============================================================
+
+@app.route("/productos", methods=["GET", "POST"])
+@login_required
+@permission_required("productos")
+def productos():
+    if request.method == "POST":
+        file = request.files.get("archivo_productos")
+        if not file or not file.filename:
+            flash("Debes seleccionar un archivo Excel.", "error")
+            return redirect(url_for("productos"))
+
+        if not file.filename.lower().endswith((".xlsx", ".xlsm")):
+            flash("Formato no permitido. Sube un archivo .xlsx o .xlsm.", "error")
+            return redirect(url_for("productos"))
+
+        try:
+            resultado = procesar_excel_productos(file)
+            flash(
+                f"Productos actualizados: {resultado['total']} filas, {resultado['creados']} creados, "
+                f"{resultado['actualizados']} actualizados, {resultado['errores']} errores.",
+                "success"
+            )
+            return redirect(url_for("productos"))
+        except Exception as exc:
+            flash(f"Error al importar productos: {exc}", "error")
+            return redirect(url_for("productos"))
+
+    q = request.args.get("q", "").strip()
+    wheres = []
+    params = []
+    if q:
+        q_norm = normalize_text(q)
+        tokens = tokenize_search(q)
+        if tokens:
+            wheres.append("(" + " OR ".join(["descripcion_busqueda LIKE ?" for _ in tokens[:5]]) + " OR codigo_producto LIKE ?)")
+            params.extend([f"%{t}%" for t in tokens[:5]])
+            params.append(f"%{q}%")
+        else:
+            wheres.append("codigo_producto LIKE ?")
+            params.append(f"%{q}%")
+
+    where_sql = "WHERE " + " AND ".join(wheres) if wheres else ""
+    rows = query_all(f"""
+        SELECT * FROM productos
+        {where_sql}
+        ORDER BY activo DESC, updated_at DESC
+        LIMIT 250
+    """, params)
+
+    stats = {
+        "total": query_one("SELECT COUNT(*) c FROM productos")["c"],
+        "activos": query_one("SELECT COUNT(*) c FROM productos WHERE activo = 1")["c"],
+        "con_stock": query_one("SELECT COUNT(*) c FROM productos WHERE activo = 1 AND stock > 0")["c"],
+    }
+    last_import = query_one("SELECT * FROM producto_importaciones ORDER BY id DESC LIMIT 1")
+    history = query_all("SELECT * FROM producto_importaciones ORDER BY id DESC LIMIT 10")
+
+    return render_page("Productos", r"""
+    <div class="page-head">
+        <div>
+            <h1>Productos / Maestra de precios</h1>
+            <p>Importa la planilla maestra para que Elias pueda cotizar con precio, stock, margen y contribución.</p>
+        </div>
+    </div>
+
+    <div class="grid grid-3">
+        <div class="stat"><span>Total productos</span><strong>{{ stats.total }}</strong></div>
+        <div class="stat"><span>Activos</span><strong>{{ stats.activos }}</strong></div>
+        <div class="stat"><span>Activos con stock</span><strong>{{ stats.con_stock }}</strong></div>
+    </div>
+
+    <div class="card" style="margin-top:18px;">
+        <div class="section-title">
+            <div>
+                <h2>Actualizar productos desde Excel</h2>
+                {% if last_import %}
+                <p class="muted">Última actualización: <b>{{ last_import.created_at }}</b> por {{ last_import.usuario_nombre }} · {{ last_import.archivo_nombre }}</p>
+                {% else %}
+                <p class="muted">Aún no existe una importación de productos.</p>
+                {% endif %}
+            </div>
+            <a class="btn btn-secondary btn-small" href="{{ url_for('plantilla_productos') }}">Descargar plantilla</a>
+        </div>
+
+        <form method="post" enctype="multipart/form-data">
+            <div class="form-row-2">
+                <div>
+                    <label>Archivo Excel de productos</label>
+                    <input type="file" name="archivo_productos" accept=".xlsx,.xlsm" required>
+                </div>
+                <div class="placeholder">
+                    Columnas mínimas esperadas:<br>
+                    <b>Código Producto</b>, <b>Descripción</b>, <b>Precio Compra Neto</b>, <b>Precio Venta Bruto</b>, <b>Stock</b>, <b>Activo</b>.
+                </div>
+            </div>
+            <div class="actions">
+                <button class="btn btn-primary">Importar / actualizar productos</button>
+                <a class="btn btn-secondary" href="{{ url_for('export_productos') }}">Exportar productos</a>
+            </div>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Buscar productos</h2>
+        <form method="get">
+            <div class="form-row-2">
+                <div><label>Código o descripción</label><input name="q" value="{{ request.args.get('q','') }}" placeholder="Ej: cemento, 123456, plancha OSB"></div>
+                <div class="actions" style="margin-top:24px;">
+                    <button class="btn btn-primary">Buscar</button>
+                    <a class="btn btn-secondary" href="{{ url_for('productos') }}">Limpiar</a>
+                </div>
+            </div>
+        </form>
+        <div class="table-wrap" style="margin-top:14px;">
+            <table>
+                <tr><th>Código</th><th>Descripción</th><th>Compra neto</th><th>Venta bruto</th><th>Stock</th><th>Activo</th><th>Actualizado</th></tr>
+                {% for p in rows %}
+                <tr>
+                    <td>{{ p.codigo_producto }}</td>
+                    <td>{{ p.descripcion }}</td>
+                    <td>{{ p.precio_compra_neto|money }}</td>
+                    <td>{{ p.precio_venta_bruto|money }}</td>
+                    <td>{{ "%.2f"|format(p.stock or 0) }}</td>
+                    <td>{% if p.activo %}<span class="badge ok">Sí</span>{% else %}<span class="badge bad">No</span>{% endif %}</td>
+                    <td>{{ p.updated_at }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="7" class="muted">Sin productos para mostrar.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Historial de importaciones</h2>
+        <div class="table-wrap">
+            <table>
+                <tr><th>Fecha</th><th>Archivo</th><th>Total</th><th>Creados</th><th>Actualizados</th><th>Errores</th><th>Usuario</th></tr>
+                {% for h in history %}
+                <tr>
+                    <td>{{ h.created_at }}</td>
+                    <td>{{ h.archivo_nombre }}</td>
+                    <td>{{ h.total_filas }}</td>
+                    <td>{{ h.creados }}</td>
+                    <td>{{ h.actualizados }}</td>
+                    <td>{{ h.errores }}</td>
+                    <td>{{ h.usuario_nombre }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="7" class="muted">Sin historial.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+    </div>
+    """, rows=rows, stats=stats, last_import=last_import, history=history, request=request)
+
+
+@app.route("/productos/plantilla")
+@login_required
+@permission_required("productos")
+def plantilla_productos():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Productos"
+    headers = ["Código Producto", "Descripción", "Precio Compra Neto", "Precio Venta Bruto", "Stock", "Activo"]
+    ws.append(headers)
+    ws.append(["123456", "Ejemplo producto", 1000, 1990, 10, "SI"])
+    for col in range(1, len(headers) + 1):
+        ws.cell(row=1, column=col).font = ws.cell(row=1, column=col).font.copy(bold=True)
+        ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = 24
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name="plantilla_productos_cotizacion.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+
+@app.route("/export/productos")
+@login_required
+@permission_required("productos")
+def export_productos():
+    rows = query_all("SELECT * FROM productos ORDER BY codigo_producto")
+    columns = [
+        ("codigo_producto", "Código Producto"),
+        ("descripcion", "Descripción"),
+        ("precio_compra_neto", "Precio Compra Neto"),
+        ("precio_venta_bruto", "Precio Venta Bruto"),
+        ("stock", "Stock"),
+        ("activo", "Activo"),
+        ("updated_at", "Actualizado"),
+    ]
+    return excel_response(f"productos_{today_str()}.xlsx", "Productos", columns, rows)
+
+
+# ============================================================
+# VENTAS / COTIZACIÓN IA ELIAS
+# ============================================================
+
+@app.route("/ventas", methods=["GET", "POST"])
+@login_required
+@permission_required("ventas")
+def ventas():
+    if request.method == "POST":
+        texto = request.form.get("pedido_texto", "").strip()
+        cliente = request.form.get("cliente", "").strip()
+        telefono = request.form.get("telefono", "").strip()
+        imagen = request.files.get("imagen_pedido")
+
+        if not texto and not (imagen and imagen.filename):
+            flash("Debes pegar una lista de productos o adjuntar una imagen.", "error")
+            return redirect(url_for("ventas"))
+
+        if imagen and imagen.filename and not imagen.mimetype.startswith("image/"):
+            flash("El archivo adjunto debe ser una imagen.", "error")
+            return redirect(url_for("ventas"))
+
+        if query_one("SELECT COUNT(*) c FROM productos")["c"] == 0:
+            flash("Primero debes importar la maestra de productos antes de cotizar.", "error")
+            return redirect(url_for("ventas"))
+
+        data, fuente, raw = extraer_items_con_elias(texto, imagen)
+        items = data.get("items", []) if isinstance(data, dict) else []
+        if not items:
+            flash("Elias no detectó productos en la solicitud.", "error")
+            return redirect(url_for("ventas"))
+
+        cot_id = crear_cotizacion_desde_items(cliente, telefono, texto, items, fuente, raw)
+        flash("Cotización generada correctamente con Elias.", "success")
+        return redirect(url_for("ver_cotizacion", cotizacion_id=cot_id))
+
+    last_import = query_one("SELECT * FROM producto_importaciones ORDER BY id DESC LIMIT 1")
+    recent = query_all("SELECT * FROM cotizaciones ORDER BY id DESC LIMIT 15")
+    stats = {
+        "productos_activos": query_one("SELECT COUNT(*) c FROM productos WHERE activo = 1")["c"],
+        "cotizaciones": query_one("SELECT COUNT(*) c FROM cotizaciones")["c"],
+        "api_ok": openai_is_configured(),
+        "modelo": openai_model_name(),
+    }
+
+    return render_page("Ventas", r"""
+    <div class="page-head">
+        <div>
+            <h1>Ventas / Cotización IA</h1>
+            <p>Elias genera cotizaciones usando la maestra de productos, stock, margen y contribución.</p>
+        </div>
+    </div>
+
+    <div class="grid grid-3">
+        <div class="stat"><span>Productos activos</span><strong>{{ stats.productos_activos }}</strong></div>
+        <div class="stat"><span>Cotizaciones generadas</span><strong>{{ stats.cotizaciones }}</strong></div>
+        <div class="stat"><span>Modelo IA</span><strong style="font-size:18px;">{{ stats.modelo }}</strong></div>
+    </div>
+
+    <div class="card" style="margin-top:18px;">
+        <div class="section-title">
+            <div>
+                <h2>Estado de productos</h2>
+                {% if last_import %}
+                <p class="muted">Última actualización maestra: <b>{{ last_import.created_at }}</b> · {{ last_import.archivo_nombre }} · {{ last_import.total_filas }} filas.</p>
+                {% else %}
+                <p class="muted">No hay maestra de productos importada. Debe importarse antes de cotizar.</p>
+                {% endif %}
+            </div>
+            {% if has_perm("productos") %}<a class="btn btn-secondary btn-small" href="{{ url_for('productos') }}">Actualizar productos</a>{% endif %}
+        </div>
+    </div>
+
+    <div class="ai-panel">
+        <h2 style="margin-top:0;">Elias · Asistente de ventas</h2>
+        <p class="subtle">Pega la lista del cliente o adjunta una imagen. Elias extrae productos y cantidades; el sistema cruza contra la maestra para calcular precio, stock, margen y contribución.</p>
+        {% if not stats.api_ok %}
+            <div class="flash error">OPENAI_API_KEY no está configurada. Elias usará extracción local básica hasta que configures la API.</div>
+        {% endif %}
+        <form method="post" enctype="multipart/form-data">
+            <div class="form-row-2">
+                <div>
+                    <label>Cliente</label>
+                    <input name="cliente" placeholder="Opcional">
+                </div>
+                <div>
+                    <label>Teléfono / WhatsApp</label>
+                    <input name="telefono" placeholder="Opcional">
+                </div>
+            </div>
+            <div style="margin-top:14px;">
+                <label>Lista de productos del cliente</label>
+                <textarea name="pedido_texto" placeholder="Ej: 10 sacos de cemento, 5 planchas OSB, 2 cajas de tornillos..."></textarea>
+            </div>
+            <div style="margin-top:14px;">
+                <label>Imagen de lista o pedido</label>
+                <input type="file" name="imagen_pedido" accept="image/*">
+            </div>
+            <div class="actions">
+                <button class="btn" style="background:linear-gradient(135deg,#14b8a6,#2563eb);color:white;">Generar cotización con Elias</button>
+            </div>
+        </form>
+    </div>
+
+    <div class="card" style="margin-top:18px;">
+        <h2>Cotizaciones recientes</h2>
+        <div class="table-wrap">
+            <table>
+                <tr><th>Número</th><th>Fecha</th><th>Cliente</th><th>Total bruto</th><th>Contribución</th><th>Margen</th><th>Usuario</th><th>Acción</th></tr>
+                {% for c in recent %}
+                <tr>
+                    <td>{{ c.numero }}</td>
+                    <td>{{ c.created_at }}</td>
+                    <td>{{ c.cliente }}</td>
+                    <td>{{ c.subtotal_bruto|money }}</td>
+                    <td>{{ c.contribucion_total|money }}</td>
+                    <td>{{ c.margen_total_pct|percent }}</td>
+                    <td>{{ c.usuario_nombre }}</td>
+                    <td><a class="btn btn-secondary btn-small" href="{{ url_for('ver_cotizacion', cotizacion_id=c.id) }}">Ver</a></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="8" class="muted">Sin cotizaciones.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+    </div>
+    """, last_import=last_import, recent=recent, stats=stats, has_perm=has_perm)
+
+
+@app.route("/cotizaciones/<int:cotizacion_id>")
+@login_required
+@permission_required("ventas")
+def ver_cotizacion(cotizacion_id):
+    cot = query_one("SELECT * FROM cotizaciones WHERE id = ?", (cotizacion_id,))
+    if not cot:
+        flash("Cotización no encontrada.", "error")
+        return redirect(url_for("ventas"))
+    items = query_all("SELECT * FROM cotizacion_items WHERE cotizacion_id = ? ORDER BY id", (cotizacion_id,))
+
+    return render_page("Cotización", r"""
+    <div class="page-head">
+        <div>
+            <h1>Cotización {{ cot.numero }}</h1>
+            <p>Generada por {{ cot.usuario_nombre }} el {{ cot.created_at }} · Fuente: {{ cot.fuente }}</p>
+        </div>
+        <div class="actions">
+            <a class="btn btn-secondary" href="{{ url_for('ventas') }}">Volver a ventas</a>
+            <a class="btn btn-primary" href="{{ url_for('export_cotizacion', cotizacion_id=cot.id) }}">Exportar Excel</a>
+        </div>
+    </div>
+
+    <div class="grid grid-4">
+        <div class="quote-total"><span class="muted">Total bruto</span><h2>{{ cot.subtotal_bruto|money }}</h2></div>
+        <div class="quote-total"><span class="muted">Venta neta</span><h2>{{ cot.venta_neta_total|money }}</h2></div>
+        <div class="quote-total"><span class="muted">Contribución</span><h2>{{ cot.contribucion_total|money }}</h2></div>
+        <div class="quote-total"><span class="muted">Margen</span><h2>{{ cot.margen_total_pct|percent }}</h2></div>
+    </div>
+
+    <div class="card" style="margin-top:18px;">
+        <h2>Detalle</h2>
+        <div class="table-wrap">
+            <table>
+                <tr>
+                    <th>Match</th><th>Código</th><th>Solicitado</th><th>Producto encontrado</th>
+                    <th>Cant.</th><th>Stock</th><th>Compra neto</th><th>Venta bruto</th>
+                    <th>Subtotal bruto</th><th>Contribución</th><th>Margen</th>
+                </tr>
+                {% for i in items %}
+                <tr>
+                    <td>{% if i.encontrado %}<span class="match-ok">OK</span>{% else %}<span class="match-bad">No encontrado</span>{% endif %}</td>
+                    <td>{{ i.codigo_producto }}</td>
+                    <td>{{ i.descripcion_solicitada }}</td>
+                    <td>{{ i.descripcion_producto }}</td>
+                    <td>{{ "%.2f"|format(i.cantidad or 0) }}</td>
+                    <td>{{ "%.2f"|format(i.stock or 0) }}</td>
+                    <td>{{ i.precio_compra_neto|money }}</td>
+                    <td>{{ i.precio_venta_bruto|money }}</td>
+                    <td>{{ i.subtotal_bruto|money }}</td>
+                    <td>{{ i.contribucion_total|money }}</td>
+                    <td>{{ i.margen_pct|percent }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+        </div>
+    </div>
+
+    <div class="grid grid-2">
+        <div class="card">
+            <h3>Solicitud original</h3>
+            <pre style="white-space:pre-wrap;font-family:inherit;">{{ cot.texto_original }}</pre>
+        </div>
+        <div class="card">
+            <h3>Notas técnicas</h3>
+            <p class="muted">La contribución se calcula como venta neta menos precio compra neto. La venta neta se estima quitando IVA desde el precio venta bruto.</p>
+            <p class="muted">IVA usado: {{ iva }}%</p>
+        </div>
+    </div>
+    """, cot=cot, items=items, iva=round(iva_rate()*100, 2))
+
+
+@app.route("/cotizaciones/<int:cotizacion_id>/excel")
+@login_required
+@permission_required("ventas")
+def export_cotizacion(cotizacion_id):
+    cot = query_one("SELECT * FROM cotizaciones WHERE id = ?", (cotizacion_id,))
+    if not cot:
+        flash("Cotización no encontrada.", "error")
+        return redirect(url_for("ventas"))
+
+    items = query_all("SELECT * FROM cotizacion_items WHERE cotizacion_id = ? ORDER BY id", (cotizacion_id,))
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Cotización"
+    ws.append(["Cotización", cot["numero"]])
+    ws.append(["Fecha", cot["created_at"]])
+    ws.append(["Cliente", cot["cliente"] or ""])
+    ws.append(["Teléfono", cot["telefono"] or ""])
+    ws.append([])
+    headers = [
+        "Código", "Solicitado", "Producto", "Cantidad", "Stock", "Compra Neto",
+        "Venta Bruto", "Subtotal Bruto", "Contribución", "Margen"
+    ]
+    ws.append(headers)
+
+    for item in items:
+        ws.append([
+            item["codigo_producto"],
+            item["descripcion_solicitada"],
+            item["descripcion_producto"],
+            item["cantidad"],
+            item["stock"],
+            item["precio_compra_neto"],
+            item["precio_venta_bruto"],
+            item["subtotal_bruto"],
+            item["contribucion_total"],
+            item["margen_pct"],
+        ])
+
+    ws.append([])
+    ws.append(["", "", "", "", "", "", "Total bruto", cot["subtotal_bruto"], "Contribución", cot["contribucion_total"]])
+    ws.append(["", "", "", "", "", "", "Venta neta", cot["venta_neta_total"], "Margen", cot["margen_total_pct"]])
+
+    for row in ws.iter_rows(min_row=6, max_row=6):
+        for cell in row:
+            cell.font = cell.font.copy(bold=True)
+
+    for col in ws.columns:
+        letter = col[0].column_letter
+        max_len = min(max(len(str(c.value or "")) for c in col) + 2, 42)
+        ws.column_dimensions[letter].width = max_len
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=f"{cot['numero']}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+
 # ============================================================
 # INTEGRACIONES / FACTURACIÓN.CL
 # ============================================================
@@ -2635,7 +3796,9 @@ def exportar():
         <a class="card" href="{{ url_for('export_auditoria') }}"><h3>Auditoría</h3><p class="muted">Eventos de edición y control por usuario.</p></a>
         <a class="card" href="{{ url_for('export_maquinarias') }}"><h3>Maquinarias</h3><p class="muted">Listado de maquinaria y estados.</p></a>
         <a class="card" href="{{ url_for('export_vehiculos') }}"><h3>Vehículos</h3><p class="muted">Patentes, documentos y vencimientos.</p></a>
-        <a class="card danger-zone" href="{{ url_for('backup_db') }}"><h3>Backup base de datos</h3><p class="muted">Descarga un respaldo completo de usuarios, despachos, maquinarias, mantenciones, auditoría y configuración.</p></a>
+        <a class="card" href="{{ url_for('export_productos') }}"><h3>Productos</h3><p class="muted">Maestra de precios, stock, margen y estado activo.</p></a>
+        <a class="card" href="{{ url_for('ventas') }}"><h3>Cotizaciones</h3><p class="muted">Cotizaciones generadas por Elias y ventas.</p></a>
+        <a class="card danger-zone" href="{{ url_for('backup_db') }}"><h3>Backup base de datos</h3><p class="muted">Descarga un respaldo completo de usuarios, despachos, maquinarias, mantenciones, productos, cotizaciones, auditoría y configuración.</p></a>
     </div>
     """)
 
