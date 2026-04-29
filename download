@@ -1,17 +1,7 @@
-{% extends "base.html" %}
-{% block title %}Dashboard | Ferretería San Pedro{% endblock %}
-{% block content %}
-<section class="hero"><div><h1>Dashboard operativo</h1><p>Resumen ejecutivo de entregas, montos, pendientes, anulaciones y actividad de usuarios.</p></div><a class="secondary" href="{{ url_for('export_excel', start=today, end=today) }}">Exportar hoy</a></section>
-
-<h2 class="section-title">Hoy</h2>
-{% set summary = today_summary %}{% include "_summary.html" %}
-<h2 class="section-title">Mes actual</h2>
-{% set summary = month_summary %}{% include "_summary.html" %}
-
-<section class="dashboard-grid">
-  <article class="card"><h2>Actividad por usuario este mes</h2><div class="rank-list">{% for name,total in users_activity %}<div><span>{{ name }}</span><strong>{{ total }}</strong></div>{% else %}<p class="muted">Sin actividad este mes.</p>{% endfor %}</div></article>
-  <article class="card"><h2>Auditoría reciente</h2><div class="timeline">{% for log in recent_logs %}<div class="timeline-item"><strong>{{ log.action }}</strong><span>{{ log.created_at.strftime('%d-%m-%Y %H:%M') }}{% if log.user %} · {{ log.user.name }}{% endif %}</span><p>{{ log.detail or '' }}</p></div>{% else %}<p class="muted">Sin movimientos recientes.</p>{% endfor %}</div></article>
-</section>
-
-<section class="card"><div class="card-head"><h2>Últimos registros</h2><a class="secondary" href="{{ url_for('consultas') }}">Abrir consultas</a></div>{% set deliveries = recent_deliveries %}{% include "_table.html" %}</section>
-{% endblock %}
+__pycache__/
+*.pyc
+*.db
+.env
+.venv/
+venv/
+.DS_Store
