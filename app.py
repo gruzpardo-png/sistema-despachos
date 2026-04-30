@@ -24,7 +24,7 @@ from openpyxl import Workbook
 
 
 APP_NAME = "Ferretería Cloud Tool"
-APP_VERSION = "v4.6 Chat Ventas Integrado"
+APP_VERSION = "v4.7 Simplificado Operación"
 DB_PATH = os.environ.get("DATABASE_PATH", "ferreteria_cloud_tool.db")
 SECRET_KEY = os.environ.get("SECRET_KEY", "cambiar-esta-clave-en-render")
 
@@ -1165,6 +1165,7 @@ def init_db():
         patente TEXT,
         conductor TEXT,
         pioneta TEXT,
+        observacion TEXT,
         monto REAL DEFAULT 0,
         usuario_id INTEGER,
         usuario_nombre TEXT,
@@ -1406,6 +1407,7 @@ def init_db():
             "patente TEXT",
             "conductor TEXT",
             "pioneta TEXT",
+            "observacion TEXT",
             "monto REAL DEFAULT 0",
             "usuario_id INTEGER",
             "usuario_nombre TEXT",
@@ -1572,11 +1574,9 @@ PERMISSION_LABELS = {
     "auditoria": "Auditoría",
     "administracion": "Administración / Configuración",
     "usuarios": "Usuarios",
-    "maquinarias": "Maquinarias",
-    "vehiculos": "Vehículos / Patentes",
+    "maquinarias": "Maquinarias / Vehículos",
     "logistica": "Conductores / Pionetas",
     "exportar": "Exportar Excel",
-    "integraciones": "Integraciones",
 }
 
 
@@ -2149,9 +2149,7 @@ BASE_TEMPLATE = r"""
                 <span class="nav-label">Administración</span>
                 <a class="nav-link" href="{{ url_for('administracion') }}">Administración</a>
                 <a class="nav-link" href="{{ url_for('usuarios') }}">Usuarios</a>
-                <a class="nav-link" href="{{ url_for('productos') }}">Productos</a>
-                <a class="nav-link" href="{{ url_for('maquinarias') }}">Maquinarias</a>
-                <a class="nav-link" href="{{ url_for('vehiculos') }}">Vehículos</a>
+                <a class="nav-link" href="{{ url_for('maquinarias') }}">Maquinarias / Vehículos</a>
                 <a class="nav-link" href="{{ url_for('logistica') }}">Conductores</a>
             </div>
 
@@ -2159,11 +2157,6 @@ BASE_TEMPLATE = r"""
                 <span class="nav-label">Control</span>
                 <a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a>
                 <a class="nav-link" href="{{ url_for('auditoria') }}">Auditoría</a>
-            </div>
-
-            <div class="nav-section integrations">
-                <span class="nav-label">Integraciones</span>
-                <a class="nav-link" href="{{ url_for('facturacion') }}">Facturación.cl</a>
                 <a class="nav-link" href="{{ url_for('exportar') }}">Exportar Excel</a>
             </div>
             {% endif %}
@@ -2452,6 +2445,9 @@ def dashboard():
 def despachos():
     estados = ["Entregado", "Pendiente"]
     tipos = get_config_list("tipos_documento")
+    vehs = query_all("SELECT patente FROM vehiculos WHERE estado = 'Activo' ORDER BY patente")
+    conductores = query_all("SELECT nombre FROM personas_logistica WHERE tipo = 'Conductor' AND estado = 'Activo' ORDER BY nombre")
+    pionetas = query_all("SELECT nombre FROM personas_logistica WHERE tipo = 'Pioneta' AND estado = 'Activo' ORDER BY nombre")
 
     if request.method == "POST":
         user = current_user()
@@ -2467,10 +2463,10 @@ def despachos():
             new_id = insert_and_get_id("""
                 INSERT INTO despachos (
                     numero_documento, tipo_documento, estado, cliente, telefono, destino,
-                    patente, conductor, pioneta, monto, usuario_id, usuario_nombre,
+                    patente, conductor, pioneta, observacion, monto, usuario_id, usuario_nombre,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 numero,
                 tipo,
@@ -2478,9 +2474,10 @@ def despachos():
                 "",
                 "",
                 "",
-                "",
-                "",
-                "",
+                request.form.get("patente", "").strip().upper(),
+                request.form.get("conductor", "").strip(),
+                request.form.get("pioneta", "").strip(),
+                request.form.get("observacion", "").strip(),
                 money_to_float(request.form.get("monto")),
                 user["id"],
                 user["full_name"],
@@ -2498,7 +2495,7 @@ def despachos():
     <div class="page-head">
         <div>
             <h1>Módulo Despachos</h1>
-            <p>Registro rápido para operadores: documento, tipo, estado y monto. El usuario queda registrado automáticamente.</p>
+            <p>Registro rápido para operadores. Documento, estado y logística básica en solo dos filas.</p>
         </div>
     </div>
 
@@ -2529,6 +2526,34 @@ def despachos():
                 </div>
             </div>
 
+            <div class="form-row" style="margin-top:14px;">
+                <div>
+                    <label>Patente</label>
+                    <input name="patente" list="patentes" placeholder="Ej: ABCD12">
+                    <datalist id="patentes">
+                        {% for v in vehs %}<option value="{{ v.patente }}">{% endfor %}
+                    </datalist>
+                </div>
+                <div>
+                    <label>Chofer</label>
+                    <input name="conductor" list="conductores" placeholder="Chofer">
+                    <datalist id="conductores">
+                        {% for c in conductores %}<option value="{{ c.nombre }}">{% endfor %}
+                    </datalist>
+                </div>
+                <div>
+                    <label>Pioneta</label>
+                    <input name="pioneta" list="pionetas" placeholder="Pioneta">
+                    <datalist id="pionetas">
+                        {% for p in pionetas %}<option value="{{ p.nombre }}">{% endfor %}
+                    </datalist>
+                </div>
+                <div>
+                    <label>Observación</label>
+                    <input name="observacion" placeholder="Opcional">
+                </div>
+            </div>
+
             <div class="actions">
                 <button class="btn btn-primary">Guardar despacho</button>
                 <a class="btn btn-secondary" href="{{ url_for('consulta') }}">Ir a consulta</a>
@@ -2544,7 +2569,7 @@ def despachos():
         <div class="table-wrap">
             <table>
                 <tr>
-                    <th>ID</th><th>Documento</th><th>Estado</th><th>Monto</th><th>Usuario</th><th>Fecha</th>{% if is_admin %}<th>Acción</th>{% endif %}
+                    <th>ID</th><th>Documento</th><th>Estado</th><th>Monto</th><th>Patente</th><th>Chofer</th><th>Pioneta</th><th>Observación</th><th>Usuario</th><th>Fecha</th>{% if is_admin %}<th>Acción</th>{% endif %}
                 </tr>
                 {% for d in recientes %}
                 <tr>
@@ -2552,6 +2577,10 @@ def despachos():
                     <td>{{ d.tipo_documento }} {{ d.numero_documento }}</td>
                     <td><span class="badge {% if d.estado == 'Entregado' %}ok{% elif d.estado == 'Pendiente' %}warn{% else %}info{% endif %}">{{ d.estado }}</span></td>
                     <td>{{ d.monto|money }}</td>
+                    <td>{{ d.patente }}</td>
+                    <td>{{ d.conductor }}</td>
+                    <td>{{ d.pioneta }}</td>
+                    <td>{{ d.observacion }}</td>
                     <td>{{ d.usuario_nombre }}</td>
                     <td>{{ d.created_at }}</td>
                     {% if is_admin %}
@@ -2559,7 +2588,7 @@ def despachos():
                     {% endif %}
                 </tr>
                 {% else %}
-                <tr><td colspan="7" class="muted">Sin registros.</td></tr>
+                <tr><td colspan="11" class="muted">Sin registros.</td></tr>
                 {% endfor %}
             </table>
         </div>
@@ -2583,7 +2612,9 @@ def despachos():
         </div>
     </div>
     {% endif %}
-    """, estados=estados, tipos=tipos, recientes=recientes, audit=audit, is_admin=is_admin())
+    """, estados=estados, tipos=tipos, recientes=recientes, audit=audit, is_admin=is_admin(),
+       vehs=vehs, conductores=conductores, pionetas=pionetas)
+
 
 @app.route("/despachos/<int:despacho_id>/editar", methods=["GET", "POST"])
 @login_required
@@ -2596,7 +2627,7 @@ def edit_despacho(despacho_id):
 
     estados = ["Entregado", "Pendiente"]
     tipos = get_config_list("tipos_documento")
-    fields = ["numero_documento", "tipo_documento", "estado", "monto"]
+    fields = ["numero_documento", "tipo_documento", "estado", "monto", "patente", "conductor", "pioneta", "observacion"]
 
     if request.method == "POST":
         estado = request.form.get("estado", "Entregado").strip() or "Entregado"
@@ -2608,6 +2639,10 @@ def edit_despacho(despacho_id):
             "tipo_documento": request.form.get("tipo_documento", "").strip(),
             "estado": estado,
             "monto": money_to_float(request.form.get("monto")),
+            "patente": request.form.get("patente", "").strip().upper(),
+            "conductor": request.form.get("conductor", "").strip(),
+            "pioneta": request.form.get("pioneta", "").strip(),
+            "observacion": request.form.get("observacion", "").strip(),
         }
 
         for field in fields:
@@ -2618,11 +2653,12 @@ def edit_despacho(despacho_id):
 
         execute("""
             UPDATE despachos
-            SET numero_documento=?, tipo_documento=?, estado=?, monto=?, updated_at=?
+            SET numero_documento=?, tipo_documento=?, estado=?, monto=?, patente=?, conductor=?, pioneta=?, observacion=?, updated_at=?
             WHERE id=?
         """, (
             new_data["numero_documento"], new_data["tipo_documento"], new_data["estado"],
-            new_data["monto"], now_str(), despacho_id
+            new_data["monto"], new_data["patente"], new_data["conductor"], new_data["pioneta"],
+            new_data["observacion"], now_str(), despacho_id
         ))
         flash("Despacho actualizado correctamente.", "success")
         return redirect(url_for("despachos"))
@@ -2653,6 +2689,12 @@ def edit_despacho(despacho_id):
                 </div>
                 <div><label>Monto</label><input name="monto" value="{{ despacho.monto }}"></div>
             </div>
+            <div class="form-row" style="margin-top:14px;">
+                <div><label>Patente</label><input name="patente" value="{{ despacho.patente }}"></div>
+                <div><label>Chofer</label><input name="conductor" value="{{ despacho.conductor }}"></div>
+                <div><label>Pioneta</label><input name="pioneta" value="{{ despacho.pioneta }}"></div>
+                <div><label>Observación</label><input name="observacion" value="{{ despacho.observacion }}"></div>
+            </div>
             <div class="actions">
                 <button class="btn btn-primary">Guardar cambios</button>
                 <a class="btn btn-secondary" href="{{ url_for('despachos') }}">Volver</a>
@@ -2660,6 +2702,7 @@ def edit_despacho(despacho_id):
         </form>
     </div>
     """, despacho=despacho, estados=estados, tipos=tipos)
+
 
 # ============================================================
 # CONSULTA
@@ -2671,17 +2714,21 @@ def edit_despacho(despacho_id):
 def consulta():
     q = request.args.get("q", "").strip()
     estado = request.args.get("estado", "").strip()
+    patente = request.args.get("patente", "").strip()
     desde = request.args.get("desde", "").strip()
     hasta = request.args.get("hasta", "").strip()
 
     wheres = []
     params = []
     if q:
-        wheres.append("(numero_documento LIKE ? OR tipo_documento LIKE ? OR usuario_nombre LIKE ?)")
-        params += [f"%{q}%", f"%{q}%", f"%{q}%"]
+        wheres.append("(numero_documento LIKE ? OR tipo_documento LIKE ? OR usuario_nombre LIKE ? OR conductor LIKE ? OR pioneta LIKE ? OR observacion LIKE ?)")
+        params += [f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"]
     if estado:
         wheres.append("estado = ?")
         params.append(estado)
+    if patente:
+        wheres.append("patente LIKE ?")
+        params.append(f"%{patente}%")
     if desde:
         wheres.append("date(created_at) >= date(?)")
         params.append(desde)
@@ -2702,7 +2749,7 @@ def consulta():
     <div class="page-head">
         <div>
             <h1>Consulta</h1>
-            <p>Búsqueda de registros rápidos de despacho. Vista simple para operación.</p>
+            <p>Búsqueda de registros de despacho y logística.</p>
         </div>
     </div>
 
@@ -2711,7 +2758,7 @@ def consulta():
             <div class="form-row">
                 <div>
                     <label>Buscar</label>
-                    <input name="q" value="{{ request.args.get('q','') }}" placeholder="Documento, tipo o usuario">
+                    <input name="q" value="{{ request.args.get('q','') }}" placeholder="Documento, usuario, chofer u observación">
                 </div>
                 <div>
                     <label>Estado</label>
@@ -2723,20 +2770,26 @@ def consulta():
                     </select>
                 </div>
                 <div>
+                    <label>Patente</label>
+                    <input name="patente" value="{{ request.args.get('patente','') }}" placeholder="Patente">
+                </div>
+                <div>
                     <label>Fecha desde</label>
                     <input type="date" name="desde" value="{{ request.args.get('desde','') }}">
                 </div>
+            </div>
+            <div class="form-row-2" style="margin-top:14px;">
                 <div>
                     <label>Fecha hasta</label>
                     <input type="date" name="hasta" value="{{ request.args.get('hasta','') }}">
                 </div>
-            </div>
-            <div class="actions">
-                <button class="btn btn-primary">Filtrar</button>
-                <a class="btn btn-secondary" href="{{ url_for('consulta') }}">Limpiar</a>
-                {% if is_admin %}
-                <a class="btn btn-secondary" href="{{ url_for('export_despachos', q=request.args.get('q',''), estado=request.args.get('estado',''), desde=request.args.get('desde',''), hasta=request.args.get('hasta','')) }}">Exportar resultado</a>
-                {% endif %}
+                <div class="actions" style="margin-top:24px;">
+                    <button class="btn btn-primary">Filtrar</button>
+                    <a class="btn btn-secondary" href="{{ url_for('consulta') }}">Limpiar</a>
+                    {% if is_admin %}
+                    <a class="btn btn-secondary" href="{{ url_for('export_despachos', q=request.args.get('q',''), estado=request.args.get('estado',''), patente=request.args.get('patente',''), desde=request.args.get('desde',''), hasta=request.args.get('hasta','')) }}">Exportar resultado</a>
+                    {% endif %}
+                </div>
             </div>
         </form>
     </div>
@@ -2746,7 +2799,7 @@ def consulta():
         <div class="table-wrap">
             <table>
                 <tr>
-                    <th>ID</th><th>Documento</th><th>Estado</th><th>Monto</th><th>Usuario</th><th>Fecha</th>
+                    <th>ID</th><th>Documento</th><th>Estado</th><th>Monto</th><th>Patente</th><th>Chofer</th><th>Pioneta</th><th>Observación</th><th>Usuario</th><th>Fecha</th>
                 </tr>
                 {% for d in rows %}
                 <tr>
@@ -2754,16 +2807,21 @@ def consulta():
                     <td>{{ d.tipo_documento }} {{ d.numero_documento }}</td>
                     <td><span class="badge {% if d.estado == 'Entregado' %}ok{% elif d.estado == 'Pendiente' %}warn{% else %}info{% endif %}">{{ d.estado }}</span></td>
                     <td>{{ d.monto|money }}</td>
+                    <td>{{ d.patente }}</td>
+                    <td>{{ d.conductor }}</td>
+                    <td>{{ d.pioneta }}</td>
+                    <td>{{ d.observacion }}</td>
                     <td>{{ d.usuario_nombre }}</td>
                     <td>{{ d.created_at }}</td>
                 </tr>
                 {% else %}
-                <tr><td colspan="6" class="muted">Sin resultados.</td></tr>
+                <tr><td colspan="10" class="muted">Sin resultados.</td></tr>
                 {% endfor %}
             </table>
         </div>
     </div>
     """, rows=rows, estados=estados, request=request, is_admin=is_admin())
+
 
 # ============================================================
 # MANTENCIONES
@@ -3039,8 +3097,8 @@ def administracion():
 
     <div class="grid grid-3">
         <div class="stat"><span>Usuarios y permisos</span><strong>{{ users_count }}</strong></div>
-        <div class="stat"><span>Maquinarias</span><strong>{{ maqs_count }}</strong></div>
-        <div class="stat"><span>Vehículos</span><strong>{{ vehs_count }}</strong></div>
+        <div class="stat"><span>Maquinarias / equipos</span><strong>{{ maqs_count }}</strong></div>
+        <div class="stat"><span>Vehículos / patentes</span><strong>{{ vehs_count }}</strong></div>
     </div>
 
     <div class="card" style="margin-top:18px;">
@@ -3064,15 +3122,15 @@ def administracion():
     <div class="grid grid-3">
         <a class="card" href="{{ url_for('usuarios') }}">
             <h3>Usuarios y permisos</h3>
-            <p class="muted">Crear usuarios, asignar roles y ocultar Dashboard a quienes no sean admin.</p>
+            <p class="muted">Crear usuarios, asignar roles y ocultar módulos administrativos.</p>
         </a>
         <a class="card" href="{{ url_for('maquinarias') }}">
-            <h3>Maquinarias</h3>
-            <p class="muted">Crear, editar y desactivar maquinaria. Modificación solo admin.</p>
+            <h3>Maquinarias / Vehículos</h3>
+            <p class="muted">Administrar equipos, camiones, patentes y vencimientos desde una sola pestaña.</p>
         </a>
-        <a class="card" href="{{ url_for('vehiculos') }}">
-            <h3>Vehículos / Patentes</h3>
-            <p class="muted">Controlar patentes, vencimientos, revisión técnica y seguro.</p>
+        <a class="card" href="{{ url_for('logistica') }}">
+            <h3>Conductores y pionetas</h3>
+            <p class="muted">Mantener nómina logística para despachos rápidos.</p>
         </a>
     </div>
     """, keys=keys, config=config,
@@ -3285,8 +3343,45 @@ def edit_usuario(user_id):
 @permission_required("maquinarias")
 def maquinarias():
     estados = get_config_list("estados_maquinaria")
+    estados_vehiculos = ["Activo", "En mantención", "Fuera de servicio", "Vendido"]
 
     if request.method == "POST":
+        registro_tipo = request.form.get("registro_tipo", "maquinaria")
+
+        if registro_tipo == "vehiculo":
+            patente = request.form.get("patente", "").strip().upper()
+            if not patente:
+                flash("La patente es obligatoria para registrar vehículo.", "error")
+                return redirect(url_for("maquinarias"))
+            if query_one("SELECT id FROM vehiculos WHERE patente = ?", (patente,)):
+                flash("Esa patente ya existe.", "error")
+                return redirect(url_for("maquinarias"))
+
+            new_id = insert_and_get_id("""
+                INSERT INTO vehiculos (
+                    patente, tipo, marca, modelo, anio, estado,
+                    permiso_circulacion_vencimiento, revision_tecnica_vencimiento,
+                    seguro_obligatorio_vencimiento, observaciones, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                patente,
+                request.form.get("tipo", "").strip(),
+                request.form.get("marca", "").strip(),
+                request.form.get("modelo", "").strip(),
+                request.form.get("anio", "").strip(),
+                request.form.get("estado", "Activo").strip(),
+                request.form.get("permiso_circulacion_vencimiento", "").strip(),
+                request.form.get("revision_tecnica_vencimiento", "").strip(),
+                request.form.get("seguro_obligatorio_vencimiento", "").strip(),
+                request.form.get("observaciones", "").strip(),
+                now_str(),
+                now_str(),
+            ))
+            write_audit("vehiculos", "crear", new_id, "patente", "", patente)
+            flash("Vehículo creado.", "success")
+            return redirect(url_for("maquinarias"))
+
         new_id = insert_and_get_id("""
             INSERT INTO maquinarias (codigo, nombre, tipo, marca, modelo, anio, patente, estado, observaciones, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -3297,7 +3392,7 @@ def maquinarias():
             request.form.get("marca", "").strip(),
             request.form.get("modelo", "").strip(),
             request.form.get("anio", "").strip(),
-            request.form.get("patente", "").strip(),
+            request.form.get("patente", "").strip().upper(),
             request.form.get("estado", "Activa").strip(),
             request.form.get("observaciones", "").strip(),
             now_str(),
@@ -3308,43 +3403,81 @@ def maquinarias():
         return redirect(url_for("maquinarias"))
 
     rows = query_all("SELECT * FROM maquinarias ORDER BY estado, nombre")
+    vehiculos_rows = query_all("SELECT * FROM vehiculos ORDER BY patente")
 
-    return render_page("Maquinarias", r"""
+    return render_page("Maquinarias / Vehículos", r"""
     <div class="page-head">
         <div>
-            <h1>Maquinarias</h1>
-            <p>Crear, editar o desactivar maquinaria. Esta sección es solo para administradores.</p>
+            <h1>Maquinarias / Vehículos</h1>
+            <p>Administración unificada de equipos, camiones, patentes y vencimientos.</p>
+        </div>
+    </div>
+
+    <div class="grid grid-2">
+        <div class="card">
+            <h2>Nueva maquinaria / equipo</h2>
+            <form method="post">
+                <input type="hidden" name="registro_tipo" value="maquinaria">
+                <div class="form-row-2">
+                    <div><label>Código interno</label><input name="codigo"></div>
+                    <div><label>Nombre *</label><input name="nombre" required></div>
+                </div>
+                <div class="form-row-2" style="margin-top:14px;">
+                    <div><label>Tipo</label><input name="tipo" placeholder="Grúa, camión, elevador, etc."></div>
+                    <div><label>Estado</label>
+                        <select name="estado">{% for e in estados %}<option>{{ e }}</option>{% endfor %}</select>
+                    </div>
+                </div>
+                <div class="form-row-2" style="margin-top:14px;">
+                    <div><label>Marca</label><input name="marca"></div>
+                    <div><label>Modelo</label><input name="modelo"></div>
+                </div>
+                <div class="form-row-2" style="margin-top:14px;">
+                    <div><label>Año</label><input name="anio"></div>
+                    <div><label>Patente</label><input name="patente"></div>
+                </div>
+                <div style="margin-top:14px;">
+                    <label>Observaciones</label>
+                    <textarea name="observaciones"></textarea>
+                </div>
+                <div class="actions"><button class="btn btn-primary">Guardar maquinaria</button></div>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2>Nuevo vehículo / patente</h2>
+            <form method="post">
+                <input type="hidden" name="registro_tipo" value="vehiculo">
+                <div class="form-row-2">
+                    <div><label>Patente *</label><input name="patente" required></div>
+                    <div><label>Tipo</label><input name="tipo" placeholder="Camión, camioneta, auto"></div>
+                </div>
+                <div class="form-row-2" style="margin-top:14px;">
+                    <div><label>Marca</label><input name="marca"></div>
+                    <div><label>Modelo</label><input name="modelo"></div>
+                </div>
+                <div class="form-row-2" style="margin-top:14px;">
+                    <div><label>Año</label><input name="anio"></div>
+                    <div><label>Estado</label>
+                        <select name="estado">{% for e in estados_vehiculos %}<option>{{ e }}</option>{% endfor %}</select>
+                    </div>
+                </div>
+                <div class="form-row-2" style="margin-top:14px;">
+                    <div><label>Permiso circulación</label><input type="date" name="permiso_circulacion_vencimiento"></div>
+                    <div><label>Revisión técnica</label><input type="date" name="revision_tecnica_vencimiento"></div>
+                </div>
+                <div class="form-row-2" style="margin-top:14px;">
+                    <div><label>Seguro obligatorio</label><input type="date" name="seguro_obligatorio_vencimiento"></div>
+                    <div><label>Observaciones</label><input name="observaciones"></div>
+                </div>
+                <div class="actions"><button class="btn btn-primary">Guardar vehículo</button></div>
+            </form>
         </div>
     </div>
 
     <div class="card">
-        <h2>Nueva maquinaria</h2>
-        <form method="post">
-            <div class="form-row">
-                <div><label>Código interno</label><input name="codigo"></div>
-                <div><label>Nombre *</label><input name="nombre" required></div>
-                <div><label>Tipo</label><input name="tipo" placeholder="Grúa, camión, elevador, etc."></div>
-                <div><label>Estado</label>
-                    <select name="estado">{% for e in estados %}<option>{{ e }}</option>{% endfor %}</select>
-                </div>
-            </div>
-            <div class="form-row" style="margin-top:14px;">
-                <div><label>Marca</label><input name="marca"></div>
-                <div><label>Modelo</label><input name="modelo"></div>
-                <div><label>Año</label><input name="anio"></div>
-                <div><label>Patente</label><input name="patente"></div>
-            </div>
-            <div style="margin-top:14px;">
-                <label>Observaciones</label>
-                <textarea name="observaciones"></textarea>
-            </div>
-            <div class="actions"><button class="btn btn-primary">Guardar maquinaria</button></div>
-        </form>
-    </div>
-
-    <div class="card">
         <div class="section-title">
-            <h2>Listado de maquinarias</h2>
+            <h2>Listado de maquinarias / equipos</h2>
             <a class="btn btn-secondary btn-small" href="{{ url_for('export_maquinarias') }}">Exportar Excel</a>
         </div>
         <div class="table-wrap">
@@ -3367,7 +3500,34 @@ def maquinarias():
             </table>
         </div>
     </div>
-    """, rows=rows, estados=estados)
+
+    <div class="card">
+        <div class="section-title">
+            <h2>Listado de vehículos / patentes</h2>
+            <a class="btn btn-secondary btn-small" href="{{ url_for('export_vehiculos') }}">Exportar Excel</a>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <tr><th>Patente</th><th>Tipo</th><th>Marca/Modelo</th><th>Estado</th><th>Permiso</th><th>Rev. técnica</th><th>SOAP</th><th>Obs.</th><th>Acción</th></tr>
+                {% for v in vehiculos_rows %}
+                <tr>
+                    <td>{{ v.patente }}</td>
+                    <td>{{ v.tipo }}</td>
+                    <td>{{ v.marca }} {{ v.modelo }} {{ v.anio }}</td>
+                    <td><span class="badge {% if v.estado == 'Activo' %}ok{% elif v.estado == 'Fuera de servicio' %}bad{% else %}warn{% endif %}">{{ v.estado }}</span></td>
+                    <td>{{ v.permiso_circulacion_vencimiento }}</td>
+                    <td>{{ v.revision_tecnica_vencimiento }}</td>
+                    <td>{{ v.seguro_obligatorio_vencimiento }}</td>
+                    <td>{{ v.observaciones }}</td>
+                    <td><a class="btn btn-secondary btn-small" href="{{ url_for('edit_vehiculo', vehiculo_id=v.id) }}">Editar</a></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="9" class="muted">Sin vehículos.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+    </div>
+    """, rows=rows, vehiculos_rows=vehiculos_rows, estados=estados, estados_vehiculos=estados_vehiculos)
 
 
 @app.route("/maquinarias/<int:maquinaria_id>/editar", methods=["GET", "POST"])
@@ -3388,7 +3548,7 @@ def edit_maquinaria(maquinaria_id):
             "marca": request.form.get("marca", "").strip(),
             "modelo": request.form.get("modelo", "").strip(),
             "anio": request.form.get("anio", "").strip(),
-            "patente": request.form.get("patente", "").strip(),
+            "patente": request.form.get("patente", "").strip().upper(),
             "estado": request.form.get("estado", "").strip(),
             "observaciones": request.form.get("observaciones", "").strip(),
         }
@@ -3438,8 +3598,11 @@ def edit_maquinaria(maquinaria_id):
 
 @app.route("/vehiculos", methods=["GET", "POST"])
 @login_required
-@permission_required("vehiculos")
+@permission_required("maquinarias")
 def vehiculos():
+    if request.method == "GET":
+        return redirect(url_for("maquinarias"))
+
     if request.method == "POST":
         patente = request.form.get("patente", "").strip().upper()
         if not patente:
@@ -3470,7 +3633,7 @@ def vehiculos():
             ))
             write_audit("vehiculos", "crear", new_id, "patente", "", patente)
             flash("Vehículo creado.", "success")
-            return redirect(url_for("vehiculos"))
+            return redirect(url_for("maquinarias"))
 
     rows = query_all("SELECT * FROM vehiculos ORDER BY patente")
 
@@ -3530,12 +3693,12 @@ def vehiculos():
 
 @app.route("/vehiculos/<int:vehiculo_id>/editar", methods=["GET", "POST"])
 @login_required
-@permission_required("vehiculos")
+@permission_required("maquinarias")
 def edit_vehiculo(vehiculo_id):
     v = query_one("SELECT * FROM vehiculos WHERE id = ?", (vehiculo_id,))
     if not v:
         flash("Vehículo no encontrado.", "error")
-        return redirect(url_for("vehiculos"))
+        return redirect(url_for("maquinarias"))
 
     if request.method == "POST":
         data = {
@@ -3565,7 +3728,7 @@ def edit_vehiculo(vehiculo_id):
             data["seguro_obligatorio_vencimiento"], data["observaciones"], now_str(), vehiculo_id
         ))
         flash("Vehículo actualizado.", "success")
-        return redirect(url_for("vehiculos"))
+        return redirect(url_for("maquinarias"))
 
     return render_page("Editar vehículo", r"""
     <div class="page-head"><div><h1>Editar vehículo</h1><p>Control administrativo de patente y vencimientos.</p></div></div>
@@ -3593,7 +3756,7 @@ def edit_vehiculo(vehiculo_id):
             </div>
             <div class="actions">
                 <button class="btn btn-primary">Guardar cambios</button>
-                <a class="btn btn-secondary" href="{{ url_for('vehiculos') }}">Volver</a>
+                <a class="btn btn-secondary" href="{{ url_for('maquinarias') }}">Volver</a>
             </div>
         </form>
     </div>
@@ -4585,47 +4748,10 @@ def export_cotizacion(cotizacion_id):
 
 @app.route("/facturacion")
 @login_required
-@permission_required("integraciones")
+@permission_required("administracion")
 def facturacion():
-    return render_page("Facturación.cl", r"""
-    <div class="page-head">
-        <div>
-            <h1>Integración Facturación.cl</h1>
-            <p>Módulo preparado para conectar documentos electrónicos y evitar doble digitación.</p>
-        </div>
-    </div>
-
-    <div class="card">
-        <h2>Estado del módulo</h2>
-        <div class="placeholder">
-            Esta versión deja preparada la sección de integración, pero aún no consulta la API real.
-            El siguiente paso técnico es conectar credenciales, WSDL/API y mapear documento → despacho.
-        </div>
-    </div>
-
-    <div class="grid grid-2">
-        <div class="card">
-            <h3>Datos que debería traer</h3>
-            <ul>
-                <li>Factura, boleta o guía.</li>
-                <li>PDF del documento.</li>
-                <li>Monto total.</li>
-                <li>Cliente y RUT.</li>
-                <li>Fecha de emisión.</li>
-                <li>Estado del documento.</li>
-            </ul>
-        </div>
-        <div class="card">
-            <h3>Uso operacional</h3>
-            <ul>
-                <li>Buscar documento por número.</li>
-                <li>Precargar cliente y monto en despacho.</li>
-                <li>Evitar documentos duplicados.</li>
-                <li>Adjuntar link o PDF al registro.</li>
-            </ul>
-        </div>
-    </div>
-    """)
+    flash("Integración tributaria deshabilitada temporalmente. No está visible en el menú.", "info")
+    return redirect(url_for("administracion"))
 
 
 # ============================================================
@@ -4712,17 +4838,21 @@ def backup_db():
 def export_despachos():
     q = request.args.get("q", "").strip()
     estado = request.args.get("estado", "").strip()
+    patente = request.args.get("patente", "").strip()
     desde = request.args.get("desde", "").strip()
     hasta = request.args.get("hasta", "").strip()
 
     wheres = []
     params = []
     if q:
-        wheres.append("(numero_documento LIKE ? OR tipo_documento LIKE ? OR usuario_nombre LIKE ?)")
-        params += [f"%{q}%", f"%{q}%", f"%{q}%"]
+        wheres.append("(numero_documento LIKE ? OR tipo_documento LIKE ? OR usuario_nombre LIKE ? OR conductor LIKE ? OR pioneta LIKE ? OR observacion LIKE ?)")
+        params += [f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"]
     if estado:
         wheres.append("estado = ?")
         params.append(estado)
+    if patente:
+        wheres.append("patente LIKE ?")
+        params.append(f"%{patente}%")
     if desde:
         wheres.append("date(created_at) >= date(?)")
         params.append(desde)
@@ -4738,11 +4868,15 @@ def export_despachos():
         ("tipo_documento", "Tipo documento"),
         ("estado", "Estado"),
         ("monto", "Monto"),
+        ("patente", "Patente"),
+        ("conductor", "Chofer"),
+        ("pioneta", "Pioneta"),
+        ("observacion", "Observación"),
         ("usuario_nombre", "Usuario"),
         ("created_at", "Creado"),
         ("updated_at", "Actualizado"),
     ]
-    return excel_response(f"despachos_rapidos_{today_str()}.xlsx", "Despachos", columns, rows)
+    return excel_response(f"despachos_{today_str()}.xlsx", "Despachos", columns, rows)
 
 @app.route("/export/mantenciones")
 @login_required
