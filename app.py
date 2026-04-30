@@ -11,6 +11,7 @@ from io import BytesIO
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from functools import wraps
+from difflib import SequenceMatcher
 
 from flask import (
     Flask, request, redirect, url_for, session, flash,
@@ -23,7 +24,7 @@ from openpyxl import Workbook
 
 
 APP_NAME = "Ferretería Cloud Tool"
-APP_VERSION = "v4.4 Ventas IA Elias"
+APP_VERSION = "v4.5 Ventas Chat Elias"
 DB_PATH = os.environ.get("DATABASE_PATH", "ferreteria_cloud_tool.db")
 SECRET_KEY = os.environ.get("SECRET_KEY", "cambiar-esta-clave-en-render")
 
@@ -99,8 +100,32 @@ def backup_database_if_exists(label="manual"):
         return None
 
 
+def ensure_database_parent():
+    parent = os.path.dirname(os.path.abspath(DB_PATH))
+    if parent and not os.path.exists(parent):
+        try:
+            os.makedirs(parent, exist_ok=True)
+            print(f"[DB] Carpeta creada para SQLite: {parent}", flush=True)
+        except Exception as exc:
+            print("[DB ERROR] No se pudo crear/abrir la carpeta de la base de datos.", flush=True)
+            print(f"[DB ERROR] DATABASE_PATH={DB_PATH}", flush=True)
+            print(f"[DB ERROR] Carpeta esperada={parent}", flush=True)
+            print("[DB ERROR] En Render revisa: Disks -> Mount Path y Environment -> DATABASE_PATH.", flush=True)
+            print(f"[DB ERROR] Detalle original: {exc}", flush=True)
+            raise
+
+
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    ensure_database_parent()
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+    except sqlite3.OperationalError as exc:
+        print("[DB ERROR] SQLite no pudo abrir la base de datos.", flush=True)
+        print(f"[DB ERROR] DATABASE_PATH={DB_PATH}", flush=True)
+        print("[DB ERROR] Causa probable: no existe Disk persistente, mount path incorrecto o permiso insuficiente.", flush=True)
+        print("[DB ERROR] Solución recomendada: Disk Mount Path /data y DATABASE_PATH=/data/ferreteria_cloud_tool.db", flush=True)
+        print(f"[DB ERROR] Detalle original: {exc}", flush=True)
+        raise
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -286,15 +311,16 @@ def margen_pct(precio_compra_neto, precio_venta_bruto):
     return contribucion_unitaria(precio_compra_neto, precio_venta_bruto) / venta_neta
 
 
-def tokenize_search(text):
-    stop = {
-        "DE", "DEL", "LA", "EL", "LOS", "LAS", "PARA", "POR", "CON", "UN", "UNA",
-        "UNIDAD", "UNIDADES", "UND", "UD", "U", "X", "NECESITO", "QUIERO", "DAME",
-        "COTIZAR", "COTIZACION", "COTIZACIÓN", "LISTA", "PRODUCTO", "PRODUCTOS"
-    }
-    tokens = [t for t in normalize_text(text).split() if len(t) >= 2 and t not in stop]
-    # Evita queries demasiado grandes.
-    return tokens[:8]
+
+SALES_STOPWORDS = {
+    "DE", "DEL", "LA", "EL", "LOS", "LAS", "PARA", "POR", "CON", "UN", "UNA",
+    "UNIDAD", "UNIDADES", "UND", "UD", "U", "X", "NECESITO", "QUIERO", "DAME",
+    "COTIZAR", "COTIZACION", "COTIZACIÓN", "LISTA", "PRODUCTO", "PRODUCTOS",
+    "HOLA", "BUENAS", "BUENOS", "DIAS", "DIA", "TARDES", "NOCHES", "FAVOR",
+    "PORFA", "PORFAVOR", "QUISEIRA", "QUISIERA", "SGTE", "SIGUIENTE", "SIGTE",
+    "LO", "ESTO", "ESTOS", "LAS", "LOS", "MM", "CM", "MT", "MTS", "METRO",
+    "METROS", "BTO", "BRUTO", "NETO"
+}
 
 
 def producto_por_codigo(codigo):
@@ -307,6 +333,145 @@ def producto_por_codigo(codigo):
     """, (str(codigo).strip(),))
 
 
+def canonical_sales_line(text):
+    text = str(text or "").strip(" -•\t")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def is_noise_line(line):
+    n = normalize_text(line)
+    if not n:
+        return True
+    noise_exact = {
+        "HOLA", "BUENAS", "BUENOS DIAS", "BUENAS TARDES", "BUENAS NOCHES",
+        "QUISIERA COTIZAR", "QUIERO COTIZAR", "LO SGTE", "LO SIGUIENTE",
+        "LO SGTE", "GRACIAS", "SALUDOS"
+    }
+    if n in noise_exact:
+        return True
+    if len(n.split()) <= 2 and any(w in n for w in ["HOLA", "COTIZAR", "SGTE", "SIGUIENTE"]):
+        return True
+    return False
+
+
+def is_dimension_or_spec_line(line):
+    n = normalize_text(line)
+    if not n:
+        return False
+    # líneas como "5 mm", "0,4 mm x 3 mt", "0,7 mm x 3,66 mt", "2x3 bto"
+    if re.fullmatch(r"[0-9]+(?: [0-9]+)?(?: X [0-9]+)?(?: MM|CM|MT|MTS|M)?(?: X [0-9]+(?: MM|CM|MT|MTS|M)?)?(?: BTO)?", n):
+        return True
+    if re.fullmatch(r"[0-9]+X[0-9]+(?: BTO)?", n.replace(" ", "")):
+        return True
+    if any(unit in n.split() for unit in ["MM", "CM", "MT", "MTS"]) and len(n.split()) <= 6:
+        return True
+    return False
+
+
+def normalize_dimension_tokens(text):
+    text = str(text or "").upper()
+    text = text.replace(",", ".")
+    text = re.sub(r"(\d+)\s*[Xx]\s*(\d+)", r"\1X\2", text)
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*(MM|CM|MT|MTS|M)\b", r"\1 \2", text)
+    return text
+
+
+def tokenize_search(text):
+    norm = normalize_dimension_tokens(normalize_text(text))
+    raw_tokens = norm.split()
+    tokens = []
+    for t in raw_tokens:
+        if t in SALES_STOPWORDS:
+            continue
+        if re.fullmatch(r"\d+", t):
+            # número solo no sirve para buscar; se usa con contexto pero no como token primario.
+            continue
+        if len(t) < 3 and not re.fullmatch(r"\d+X\d+", t):
+            continue
+        tokens.append(t)
+    clean = []
+    for t in tokens:
+        if t not in clean:
+            clean.append(t)
+    return clean[:10]
+
+
+def token_similarity(a, b):
+    if not a or not b:
+        return 0
+    if a == b:
+        return 1
+    if len(a) >= 5 and len(b) >= 5:
+        return SequenceMatcher(None, a, b).ratio()
+    return 0
+
+
+def producto_score(query_text, producto):
+    query_norm = normalize_text(query_text)
+    desc_norm = producto["descripcion_busqueda"] or normalize_text(producto["descripcion"])
+    q_tokens = tokenize_search(query_text)
+    d_tokens = desc_norm.split()
+
+    if not q_tokens:
+        return 0, {"overlap": 0, "tokens": []}
+
+    exact_phrase = query_norm and len(query_norm) >= 8 and query_norm in desc_norm
+    overlap = 0
+    fuzzy_overlap = 0
+    matched = []
+
+    for qt in q_tokens:
+        matched_exact = qt in d_tokens or (len(qt) >= 5 and qt in desc_norm)
+        matched_fuzzy = False
+        if not matched_exact and len(qt) >= 5:
+            for dt in d_tokens:
+                if token_similarity(qt, dt) >= 0.86:
+                    matched_fuzzy = True
+                    break
+        if matched_exact:
+            overlap += 1
+            matched.append(qt)
+        elif matched_fuzzy:
+            fuzzy_overlap += 1
+            matched.append(qt + "~")
+
+    total_overlap = overlap + fuzzy_overlap
+    ratio = total_overlap / max(len(q_tokens), 1)
+
+    score = 0
+    if exact_phrase:
+        score += 55
+
+    # base por cobertura de términos reales
+    score += ratio * 65
+    score += min(total_overlap, 4) * 8
+    score += fuzzy_overlap * 4
+
+    # penaliza si el producto solo calza por medidas/códigos sueltos pero no por material/familia
+    strong_query = [t for t in q_tokens if not re.search(r"\d", t) and len(t) >= 4]
+    strong_match = 0
+    for t in strong_query:
+        if t in desc_norm or any(token_similarity(t, dt) >= 0.86 for dt in d_tokens):
+            strong_match += 1
+
+    if strong_query and strong_match == 0:
+        score -= 45
+    if len(q_tokens) >= 2 and total_overlap < 2 and not exact_phrase:
+        score -= 30
+
+    # pequeño ajuste por activo/stock, nunca suficiente para forzar un mal match
+    try:
+        if int(producto["activo"] or 0) == 1:
+            score += 3
+        if float(producto["stock"] or 0) > 0:
+            score += 2
+    except Exception:
+        pass
+
+    return round(max(score, 0), 1), {"overlap": total_overlap, "tokens": matched}
+
+
 def buscar_producto_local(descripcion="", codigo_producto=None):
     codigo = str(codigo_producto or "").strip()
     if codigo:
@@ -314,102 +479,114 @@ def buscar_producto_local(descripcion="", codigo_producto=None):
         if exact:
             return exact, 100
 
-        like = query_one("""
-            SELECT * FROM productos
-            WHERE codigo_producto LIKE ?
-            ORDER BY activo DESC, stock DESC
-            LIMIT 1
-        """, (f"%{codigo}%",))
-        if like:
-            return like, 82
+        # Solo permite búsqueda parcial por código si el código es suficientemente específico.
+        if len(codigo) >= 6:
+            like = query_one("""
+                SELECT * FROM productos
+                WHERE codigo_producto LIKE ?
+                ORDER BY activo DESC, stock DESC
+                LIMIT 1
+            """, (f"%{codigo}%",))
+            if like:
+                return like, 82
 
     tokens = tokenize_search(descripcion)
     if not tokens:
         return None, 0
 
-    # Primero busca coincidencia AND para máxima precisión.
-    clauses = ["activo = 1"]
+    # Buscar candidatos por OR amplio pero luego aplicar score estricto.
+    clauses = []
     params = []
-    for t in tokens[:5]:
+    for t in tokens[:6]:
         clauses.append("descripcion_busqueda LIKE ?")
         params.append(f"%{t}%")
-    rows = query_all(f"""
-        SELECT * FROM productos
-        WHERE {' AND '.join(clauses)}
-        ORDER BY stock DESC, precio_venta_bruto DESC
-        LIMIT 50
-    """, params)
 
-    # Si AND no encuentra, prueba OR.
-    if not rows:
-        clauses = ["activo = 1 AND (" + " OR ".join(["descripcion_busqueda LIKE ?" for _ in tokens[:5]]) + ")"]
-        params = [f"%{t}%" for t in tokens[:5]]
+    rows = []
+    if clauses:
         rows = query_all(f"""
             SELECT * FROM productos
-            WHERE {' AND '.join(clauses)}
-            ORDER BY stock DESC, precio_venta_bruto DESC
-            LIMIT 80
+            WHERE activo = 1 AND ({' OR '.join(clauses)})
+            LIMIT 250
         """, params)
+
+    # Si hay typos, usa términos de categoría genéricos para acotar.
+    if not rows:
+        broad_tokens = [t for t in tokens if not re.search(r"\d", t)][:3]
+        if broad_tokens:
+            clauses = ["descripcion_busqueda LIKE ?" for _ in broad_tokens]
+            params = [f"%{t[:5]}%" for t in broad_tokens]
+            rows = query_all(f"""
+                SELECT * FROM productos
+                WHERE activo = 1 AND ({' OR '.join(clauses)})
+                LIMIT 250
+            """, params)
 
     if not rows:
         return None, 0
 
-    query_norm = normalize_text(descripcion)
     best = None
     best_score = -1
     for row in rows:
-        desc_norm = row["descripcion_busqueda"] or normalize_text(row["descripcion"])
-        score = 0
-        if query_norm and query_norm in desc_norm:
-            score += 40
-        for t in tokens:
-            if t in desc_norm:
-                score += 10
-        try:
-            if float(row["stock"] or 0) > 0:
-                score += 4
-        except Exception:
-            pass
-        if row["activo"]:
-            score += 3
+        score, _meta = producto_score(descripcion, row)
         if score > best_score:
             best = row
             best_score = score
 
-    return best, best_score
+    # Umbral alto para no vender productos equivocados.
+    # 72+ se considera match confiable.
+    if best and best_score >= 72:
+        return best, best_score
+
+    # 58-71 se devuelve como candidato a revisión, no como match confirmado.
+    if best and best_score >= 58:
+        return {"__candidato__": best, "__score__": best_score}, best_score
+
+    return None, best_score
 
 
 def extraer_items_local(texto):
     """
-    Fallback sin IA. Intenta convertir líneas de texto en productos/cantidades.
+    Fallback sin IA. Convierte lista de materiales en líneas limpias.
+    Une líneas de especificación como "5 mm" o "0,4 mm x 3 mt" con el producto anterior.
     """
-    items = []
     raw = texto or ""
-    lines = []
+    prelim = []
     for chunk in re.split(r"[\n;]+", raw):
-        chunk = chunk.strip(" -•\t")
-        if chunk:
-            lines.append(chunk)
+        line = canonical_sales_line(chunk)
+        if line:
+            prelim.append(line)
 
-    if not lines and raw.strip():
-        lines = [raw.strip()]
+    lines = []
+    for line in prelim:
+        if is_noise_line(line):
+            continue
+        if is_dimension_or_spec_line(line) and lines:
+            lines[-1] = canonical_sales_line(lines[-1] + " " + line)
+        else:
+            lines.append(line)
 
+    items = []
     for line in lines:
         qty = 1.0
         product_text = line
 
-        # 3 x cemento / 3 unidades cemento / cemento x 3
+        # Cantidades explícitas al inicio: "3 planchas osb", "2 x cemento".
         m = re.search(r"^\s*(\d+(?:[,.]\d+)?)\s*(?:X|x|UN|UND|UDS|UNIDADES|UNIDAD)?\s+(.+)$", line)
         if m:
-            qty = parse_quantity(m.group(1), 1)
-            product_text = m.group(2).strip()
+            possible_qty = parse_quantity(m.group(1), 1)
+            rest = m.group(2).strip()
+            # Evita confundir medidas como "0,4 mm x 3 mt" con cantidades.
+            if not re.match(r"^(MM|CM|MT|MTS|M)\b", normalize_text(rest)):
+                qty = possible_qty
+                product_text = rest
         else:
             m = re.search(r"(.+?)\s+(?:X|x)\s*(\d+(?:[,.]\d+)?)\s*$", line)
-            if m:
+            if m and not re.search(r"\b(MM|CM|MT|MTS|M)\b", normalize_text(line)):
                 product_text = m.group(1).strip()
                 qty = parse_quantity(m.group(2), 1)
 
-        if product_text:
+        product_text = canonical_sales_line(product_text)
+        if product_text and not is_noise_line(product_text):
             items.append({
                 "codigo_producto": None,
                 "descripcion": product_text,
@@ -453,7 +630,8 @@ def extraer_json_desde_respuesta(raw):
 
 def extraer_items_con_elias(texto, imagen_file=None):
     """
-    Usa OpenAI Responses API si está configurada; si falla, usa fallback local.
+    Extrae items para cotización, pero no cotiza. La cotización se genera solo cuando
+    el vendedor presiona el botón Generar cotización.
     """
     data_url = None
     if imagen_file and imagen_file.filename:
@@ -467,18 +645,18 @@ def extraer_items_con_elias(texto, imagen_file=None):
         client = OpenAI()
 
         system_prompt = (
-            "Eres Elias, asistente de ventas de Ferretería Cloud Tool. "
-            "Tu única tarea es extraer productos y cantidades desde texto o imagen de listas de materiales. "
-            "Devuelve SOLO JSON válido, sin markdown, con esta estructura: "
-            "{\"items\":[{\"codigo_producto\":null,\"descripcion\":\"texto producto\",\"cantidad\":1,\"observacion\":\"\"}],\"notas\":\"\"}. "
-            "No inventes códigos. Si no hay cantidad clara, usa 1. "
-            "No calcules precios; el sistema calculará precios desde la maestra de productos."
+            "Eres Elias, asistente de ventas de Ferretería San Pedro. "
+            "Tu tarea es EXTRAER líneas de productos desde una conversación o imagen para preparar una cotización. "
+            "No busques productos en una base, no inventes códigos, no inventes precios. "
+            "Ignora saludos, frases como 'quiero cotizar', 'lo siguiente', 'gracias'. "
+            "Une especificaciones que vienen en líneas separadas con el producto anterior: por ejemplo 'Plancha fibrocemento' + '5 mm'. "
+            "IMPORTANTE: dimensiones como 0,4 mm, 0,7 mm, 3 mt, 3,66 mt NO son cantidades; son parte de la descripción. "
+            "Si no hay cantidad explícita, usa cantidad 1. "
+            "Devuelve SOLO JSON válido sin markdown con estructura: "
+            "{\"items\":[{\"codigo_producto\":null,\"descripcion\":\"producto limpio con medida\",\"cantidad\":1,\"observacion\":\"\"}],\"notas\":\"\"}."
         )
 
-        user_text = (
-            "Extrae los productos requeridos desde esta solicitud de cliente. "
-            "Respeta cantidades. Solicitud:\n\n" + (texto or "")
-        )
+        user_text = "Extrae productos y cantidades desde esta conversación/lista:\n\n" + (texto or "")
 
         user_content = [{"type": "input_text", "text": user_text}]
         if data_url:
@@ -490,28 +668,131 @@ def extraer_items_con_elias(texto, imagen_file=None):
                 {"role": "developer", "content": [{"type": "input_text", "text": system_prompt}]},
                 {"role": "user", "content": user_content},
             ],
-            max_output_tokens=2000,
+            max_output_tokens=2500,
         )
 
-        raw = getattr(response, "output_text", None)
-        if raw is None:
-            raw = str(response)
-
+        raw = getattr(response, "output_text", None) or str(response)
         data = extraer_json_desde_respuesta(raw)
         if not data or "items" not in data:
             return extraer_items_local(texto), "local", f"No se pudo interpretar JSON de Elias. Respuesta parcial: {raw[:500]}"
 
+        # Limpieza posterior: elimina líneas basura.
+        clean_items = []
+        for item in data.get("items", []):
+            desc = canonical_sales_line(item.get("descripcion") or item.get("producto") or "")
+            if desc and not is_noise_line(desc):
+                clean_items.append({
+                    "codigo_producto": item.get("codigo_producto") or item.get("codigo"),
+                    "descripcion": desc,
+                    "cantidad": parse_quantity(item.get("cantidad"), 1),
+                    "observacion": item.get("observacion") or "",
+                })
+        data["items"] = clean_items
         return data, "openai", raw
 
     except Exception as exc:
         return extraer_items_local(texto), "local", f"Error IA: {exc}"
 
 
+def respuesta_chat_elias(mensaje, contexto, imagen_file=None):
+    """
+    Respuesta conversacional. No genera cotización. Puede ayudar a aclarar y ordenar el pedido.
+    """
+    data_url = None
+    if imagen_file and imagen_file.filename:
+        data_url = imagen_a_data_url(imagen_file)
+
+    if not openai_is_configured():
+        data = extraer_items_local(mensaje)
+        items = data.get("items", [])
+        if items:
+            lista = "\n".join([f"- {i['descripcion']} · cantidad {i['cantidad']}" for i in items])
+            return "Detecté estos productos de forma local:\n" + lista + "\n\nCuando esté correcto, presiona el botón Generar cotización.", "local"
+        return "Escríbeme la lista de productos o adjunta una imagen del pedido. Cuando esté clara, usa el botón Generar cotización.", "local"
+
+    try:
+        from openai import OpenAI
+        client = OpenAI()
+        system_prompt = (
+            "Eres Elias, asistente de ventas interno de Ferretería San Pedro. "
+            "Conversas con el vendedor para ordenar el pedido del cliente. "
+            "NO generes cotización ni precios automáticamente. "
+            "Si detectas productos, devuelve un resumen claro y pide confirmación o datos faltantes. "
+            "Si el pedido es ambiguo, pregunta. "
+            "Recuerda al final de forma breve: 'Cuando esté correcto, presiona Generar cotización'."
+        )
+
+        user_content = [{"type": "input_text", "text": f"Contexto anterior:\n{contexto}\n\nNuevo mensaje:\n{mensaje}"}]
+        if data_url:
+            user_content.append({"type": "input_image", "image_url": data_url})
+
+        response = client.responses.create(
+            model=openai_model_name(),
+            input=[
+                {"role": "developer", "content": [{"type": "input_text", "text": system_prompt}]},
+                {"role": "user", "content": user_content},
+            ],
+            max_output_tokens=1200,
+        )
+        return (getattr(response, "output_text", None) or str(response)).strip(), "openai"
+    except Exception as exc:
+        return f"No pude consultar IA en este momento ({exc}). Puedes pegar la lista y luego presionar Generar cotización para usar extracción local.", "local"
+
+
+def obtener_sesion_ventas():
+    sid = session.get("ventas_chat_sesion_id")
+    if sid:
+        row = query_one("SELECT * FROM ventas_chat_sesiones WHERE id = ?", (sid,))
+        if row:
+            return row
+
+    user = current_user()
+    sid = insert_and_get_id("""
+        INSERT INTO ventas_chat_sesiones (titulo, cliente, telefono, estado, usuario_id, usuario_nombre, created_at, updated_at)
+        VALUES (?, '', '', 'Abierta', ?, ?, ?, ?)
+    """, (
+        "Nueva conversación Elias",
+        user["id"] if user else None,
+        user["full_name"] if user else "Sistema",
+        now_str(),
+        now_str(),
+    ))
+    session["ventas_chat_sesion_id"] = sid
+    return query_one("SELECT * FROM ventas_chat_sesiones WHERE id = ?", (sid,))
+
+
+def mensajes_sesion_ventas(sesion_id):
+    return query_all("SELECT * FROM ventas_chat_mensajes WHERE sesion_id = ? ORDER BY id", (sesion_id,))
+
+
+def guardar_mensaje_ventas(sesion_id, rol, contenido, ai_raw="", tiene_imagen=0):
+    mid = insert_and_get_id("""
+        INSERT INTO ventas_chat_mensajes (sesion_id, rol, contenido, ai_raw, tiene_imagen, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (sesion_id, rol, contenido or "", ai_raw or "", 1 if tiene_imagen else 0, now_str()))
+    execute("UPDATE ventas_chat_sesiones SET updated_at=? WHERE id=?", (now_str(), sesion_id))
+    return mid
+
+
+def contexto_conversacion_ventas(sesion_id):
+    mensajes = mensajes_sesion_ventas(sesion_id)
+    partes = []
+    for m in mensajes[-30:]:
+        rol = "Vendedor" if m["rol"] == "user" else "Elias"
+        partes.append(f"{rol}: {m['contenido']}")
+    return "\n".join(partes)
+
+
+def extraer_items_desde_sesion_ventas(sesion_id):
+    contexto = contexto_conversacion_ventas(sesion_id)
+    return extraer_items_con_elias(contexto, None)
+
 def generar_numero_cotizacion(cotizacion_id):
     return f"COT-{today_str().replace('-', '')}-{int(cotizacion_id):06d}"
 
 
-def crear_cotizacion_desde_items(cliente, telefono, texto_original, items_extraidos, fuente, ai_raw):
+
+def crear_cotizacion_desde_items(cliente, telefono, texto_original, items_extraidos, fuente, ai_raw, chat_session_id=None):
     user = current_user()
     now = now_str()
 
@@ -521,7 +802,7 @@ def crear_cotizacion_desde_items(cliente, telefono, texto_original, items_extrai
             subtotal_bruto, venta_neta_total, costo_neto_total, contribucion_total, margen_total_pct,
             estado, usuario_id, usuario_nombre, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 'Generada', ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 'Borrador generado', ?, ?, ?, ?)
     """, (
         "PENDIENTE",
         cliente.strip() if cliente else "",
@@ -535,6 +816,12 @@ def crear_cotizacion_desde_items(cliente, telefono, texto_original, items_extrai
         now,
     ))
 
+    try:
+        add_column_if_missing("cotizaciones", "chat_session_id INTEGER")
+        execute("UPDATE cotizaciones SET chat_session_id = ? WHERE id = ?", (chat_session_id, cot_id))
+    except Exception:
+        pass
+
     numero = generar_numero_cotizacion(cot_id)
     execute("UPDATE cotizaciones SET numero = ? WHERE id = ?", (numero, cot_id))
 
@@ -543,38 +830,57 @@ def crear_cotizacion_desde_items(cliente, telefono, texto_original, items_extrai
     costo_neto_total = 0.0
     contrib_total = 0.0
     items_guardados = 0
+    revisar = 0
 
     for item in items_extraidos:
         descripcion_solicitada = str(item.get("descripcion") or item.get("producto") or "").strip()
+        if not descripcion_solicitada or is_noise_line(descripcion_solicitada):
+            continue
+
         codigo_solicitado = item.get("codigo_producto") or item.get("codigo")
         cantidad = parse_quantity(item.get("cantidad"), 1)
 
-        producto, score = buscar_producto_local(descripcion_solicitada, codigo_solicitado)
+        producto_result, score = buscar_producto_local(descripcion_solicitada, codigo_solicitado)
 
-        if producto:
+        requiere_revision = 0
+        if isinstance(producto_result, dict) and "__candidato__" in producto_result:
+            candidato = producto_result["__candidato__"]
+            codigo = ""
+            descripcion = "REVISAR CANDIDATO: " + candidato["descripcion"]
+            compra = 0.0
+            venta_bruto = 0.0
+            stock = float(candidato["stock"] or 0)
+            encontrado = 0
+            requiere_revision = 1
+            obs = f"Candidato no confirmado. Score {score}. No se suma al total."
+            revisar += 1
+        elif producto_result:
+            producto = producto_result
             codigo = producto["codigo_producto"]
             descripcion = producto["descripcion"]
             compra = float(producto["precio_compra_neto"] or 0)
             venta_bruto = float(producto["precio_venta_bruto"] or 0)
             stock = float(producto["stock"] or 0)
             encontrado = 1
-            obs = item.get("observacion") or f"Match score {score}"
+            obs = item.get("observacion") or f"Match confiable score {score}"
         else:
             codigo = str(codigo_solicitado or "")
-            descripcion = descripcion_solicitada or "Producto no identificado"
+            descripcion = "PENDIENTE DE IDENTIFICAR"
             compra = 0.0
             venta_bruto = 0.0
             stock = 0.0
             encontrado = 0
-            obs = "No encontrado en maestra de productos"
+            requiere_revision = 1
+            obs = f"No encontrado en maestra. Score {score}"
+            revisar += 1
 
         venta_neta_unit = venta_neta_desde_bruto(venta_bruto)
         contrib_unit = venta_neta_unit - compra
-        subtotal_item = venta_bruto * cantidad
-        venta_neta_item = venta_neta_unit * cantidad
-        costo_item = compra * cantidad
-        contrib_item = contrib_unit * cantidad
-        margen_item = (contrib_unit / venta_neta_unit) if venta_neta_unit > 0 else 0
+        subtotal_item = venta_bruto * cantidad if encontrado else 0.0
+        venta_neta_item = venta_neta_unit * cantidad if encontrado else 0.0
+        costo_item = compra * cantidad if encontrado else 0.0
+        contrib_item = contrib_unit * cantidad if encontrado else 0.0
+        margen_item = (contrib_unit / venta_neta_unit) if venta_neta_unit > 0 and encontrado else 0
 
         execute("""
             INSERT INTO cotizacion_items (
@@ -590,6 +896,13 @@ def crear_cotizacion_desde_items(cliente, telefono, texto_original, items_extrai
             contrib_item, margen_item, encontrado, obs, now
         ))
 
+        # Actualiza columnas nuevas si existen.
+        try:
+            item_id = query_one("SELECT last_insert_rowid() id")["id"]
+            execute("UPDATE cotizacion_items SET match_score=?, requiere_revision=? WHERE id=?", (score or 0, requiere_revision, item_id))
+        except Exception:
+            pass
+
         subtotal_bruto += subtotal_item
         venta_neta_total += venta_neta_item
         costo_neto_total += costo_item
@@ -597,15 +910,16 @@ def crear_cotizacion_desde_items(cliente, telefono, texto_original, items_extrai
         items_guardados += 1
 
     margen_total = (contrib_total / venta_neta_total) if venta_neta_total > 0 else 0
+    estado = "Requiere revisión" if revisar else "Borrador generado"
 
     execute("""
         UPDATE cotizaciones
         SET subtotal_bruto=?, venta_neta_total=?, costo_neto_total=?, contribucion_total=?,
-            margen_total_pct=?, updated_at=?
+            margen_total_pct=?, estado=?, updated_at=?
         WHERE id=?
-    """, (subtotal_bruto, venta_neta_total, costo_neto_total, contrib_total, margen_total, now_str(), cot_id))
+    """, (subtotal_bruto, venta_neta_total, costo_neto_total, contrib_total, margen_total, estado, now_str(), cot_id))
 
-    write_audit("ventas", "crear_cotizacion", cot_id, "items", "", f"{items_guardados} productos")
+    write_audit("ventas", "crear_cotizacion", cot_id, "items", "", f"{items_guardados} productos, {revisar} revisar")
     return cot_id
 
 
@@ -974,6 +1288,36 @@ def init_db():
     )
     """)
 
+    execute("""
+    CREATE TABLE IF NOT EXISTS ventas_chat_sesiones (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        titulo TEXT,
+        cliente TEXT,
+        telefono TEXT,
+        estado TEXT DEFAULT 'Abierta',
+        usuario_id INTEGER,
+        usuario_nombre TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT
+    )
+    """)
+
+    execute("""
+    CREATE TABLE IF NOT EXISTS ventas_chat_mensajes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sesion_id INTEGER NOT NULL,
+        rol TEXT NOT NULL,
+        contenido TEXT NOT NULL,
+        ai_raw TEXT,
+        tiene_imagen INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(sesion_id) REFERENCES ventas_chat_sesiones(id)
+    )
+    """)
+
+    execute("CREATE INDEX IF NOT EXISTS idx_ventas_chat_mensajes_sesion ON ventas_chat_mensajes(sesion_id)")
+    execute("CREATE INDEX IF NOT EXISTS idx_ventas_chat_sesiones_updated ON ventas_chat_sesiones(updated_at)")
+
     execute("CREATE INDEX IF NOT EXISTS idx_productos_descripcion_busqueda ON productos(descripcion_busqueda)")
     execute("CREATE INDEX IF NOT EXISTS idx_cotizaciones_created_at ON cotizaciones(created_at)")
     execute("CREATE INDEX IF NOT EXISTS idx_cotizacion_items_cotizacion ON cotizacion_items(cotizacion_id)")
@@ -1054,10 +1398,26 @@ def init_db():
             "costo_neto_total REAL DEFAULT 0",
             "contribucion_total REAL DEFAULT 0",
             "margen_total_pct REAL DEFAULT 0",
+            "chat_session_id INTEGER",
         ],
         "cotizacion_items": [
             "venta_neta_unitaria REAL DEFAULT 0",
             "descripcion_solicitada TEXT",
+            "match_score REAL DEFAULT 0",
+            "requiere_revision INTEGER DEFAULT 0",
+        ],
+        "ventas_chat_sesiones": [
+            "cliente TEXT",
+            "telefono TEXT",
+            "estado TEXT DEFAULT 'Abierta'",
+            "usuario_id INTEGER",
+            "usuario_nombre TEXT",
+            "created_at TEXT DEFAULT ''",
+            "updated_at TEXT",
+        ],
+        "ventas_chat_mensajes": [
+            "ai_raw TEXT",
+            "tiene_imagen INTEGER DEFAULT 0",
         ],
     }
     for table, cols in extra_migration_cols.items():
@@ -1555,7 +1915,65 @@ BASE_TEMPLATE = r"""
             padding:14px;
         }
         .match-ok{color:#047857;font-weight:800}
+        .match-review{color:#b45309;font-weight:800}
         .match-bad{color:#b91c1c;font-weight:800}
+        .sales-layout{
+            display:grid;
+            grid-template-columns:minmax(0,1fr) 330px;
+            gap:18px;
+            align-items:start;
+        }
+        .chat-box{
+            background:rgba(255,255,255,.06);
+            border:1px solid rgba(148,163,184,.25);
+            border-radius:18px;
+            padding:14px;
+            max-height:520px;
+            overflow:auto;
+            display:flex;
+            flex-direction:column;
+            gap:12px;
+        }
+        .chat-msg{
+            max-width:86%;
+            border-radius:16px;
+            padding:12px 14px;
+            white-space:pre-wrap;
+            line-height:1.45;
+            font-size:14px;
+        }
+        .chat-msg.user{
+            align-self:flex-end;
+            background:rgba(20,184,166,.20);
+            border:1px solid rgba(45,212,191,.35);
+            color:#ecfeff;
+        }
+        .chat-msg.assistant{
+            align-self:flex-start;
+            background:rgba(15,23,42,.65);
+            border:1px solid rgba(96,165,250,.30);
+            color:#e5eefb;
+        }
+        .side-card{
+            background:white;
+            border:1px solid var(--border);
+            border-radius:18px;
+            padding:18px;
+            box-shadow:var(--shadow);
+        }
+        .confidence{
+            display:inline-flex;
+            align-items:center;
+            border-radius:999px;
+            padding:3px 8px;
+            font-size:11px;
+            font-weight:800;
+            background:#e5e7eb;
+            color:#374151;
+        }
+        .confidence.ok{background:#d1fae5;color:#065f46}
+        .confidence.review{background:#fef3c7;color:#92400e}
+        .confidence.bad{background:#fee2e2;color:#991b1b}
         @media (max-width:1000px){
             .form-row,.form-row-3,.form-row-2,.grid-2,.grid-3,.grid-4{grid-template-columns:1fr}
             .topbar{align-items:flex-start;flex-direction:column}
@@ -1660,6 +2078,22 @@ def render_page(title, body_template, login_screen=False, **context):
 @app.route("/health")
 def health():
     return {"status": "ok", "app": APP_NAME, "version": APP_VERSION}
+
+
+@app.route("/debug-db")
+@login_required
+@permission_required("administracion")
+def debug_db():
+    parent = os.path.dirname(os.path.abspath(DB_PATH))
+    return {
+        "DATABASE_PATH": DB_PATH,
+        "absolute_path": os.path.abspath(DB_PATH),
+        "parent_directory": parent,
+        "parent_exists": os.path.exists(parent),
+        "parent_writable": os.access(parent, os.W_OK) if os.path.exists(parent) else False,
+        "database_exists": os.path.exists(DB_PATH),
+        "app_version": APP_VERSION,
+    }
 
 
 @app.route("/")
@@ -3436,38 +3870,74 @@ def export_productos():
 # VENTAS / COTIZACIÓN IA ELIAS
 # ============================================================
 
+
 @app.route("/ventas", methods=["GET", "POST"])
 @login_required
 @permission_required("ventas")
 def ventas():
+    sesion = obtener_sesion_ventas()
+
     if request.method == "POST":
-        texto = request.form.get("pedido_texto", "").strip()
+        action = request.form.get("action", "chat")
         cliente = request.form.get("cliente", "").strip()
         telefono = request.form.get("telefono", "").strip()
-        imagen = request.files.get("imagen_pedido")
 
-        if not texto and not (imagen and imagen.filename):
-            flash("Debes pegar una lista de productos o adjuntar una imagen.", "error")
+        if cliente or telefono:
+            execute("UPDATE ventas_chat_sesiones SET cliente=?, telefono=?, updated_at=? WHERE id=?",
+                    (cliente, telefono, now_str(), sesion["id"]))
+
+        if action == "nueva_conversacion":
+            session.pop("ventas_chat_sesion_id", None)
+            flash("Nueva conversación iniciada con Elias.", "success")
             return redirect(url_for("ventas"))
 
-        if imagen and imagen.filename and not imagen.mimetype.startswith("image/"):
-            flash("El archivo adjunto debe ser una imagen.", "error")
+        if action == "chat":
+            mensaje = request.form.get("mensaje", "").strip()
+            imagen = request.files.get("imagen_pedido")
+
+            if imagen and imagen.filename and not imagen.mimetype.startswith("image/"):
+                flash("El archivo adjunto debe ser una imagen.", "error")
+                return redirect(url_for("ventas"))
+
+            if not mensaje and not (imagen and imagen.filename):
+                flash("Escribe un mensaje o adjunta una imagen.", "error")
+                return redirect(url_for("ventas"))
+
+            contenido_usuario = mensaje or "Imagen adjunta para analizar."
+            if imagen and imagen.filename:
+                contenido_usuario += f"\n[Imagen adjunta: {secure_filename(imagen.filename)}]"
+
+            guardar_mensaje_ventas(sesion["id"], "user", contenido_usuario, "", 1 if imagen and imagen.filename else 0)
+            contexto = contexto_conversacion_ventas(sesion["id"])
+            respuesta, fuente = respuesta_chat_elias(mensaje, contexto, imagen)
+            guardar_mensaje_ventas(sesion["id"], "assistant", respuesta, fuente, 0)
+
+            flash("Elias respondió. Revisa el pedido antes de generar la cotización.", "success")
             return redirect(url_for("ventas"))
 
-        if query_one("SELECT COUNT(*) c FROM productos")["c"] == 0:
-            flash("Primero debes importar la maestra de productos antes de cotizar.", "error")
-            return redirect(url_for("ventas"))
+        if action == "generar_cotizacion":
+            if query_one("SELECT COUNT(*) c FROM productos")["c"] == 0:
+                flash("Primero debes importar la maestra de productos antes de cotizar.", "error")
+                return redirect(url_for("ventas"))
 
-        data, fuente, raw = extraer_items_con_elias(texto, imagen)
-        items = data.get("items", []) if isinstance(data, dict) else []
-        if not items:
-            flash("Elias no detectó productos en la solicitud.", "error")
-            return redirect(url_for("ventas"))
+            contexto = contexto_conversacion_ventas(sesion["id"])
+            if not contexto.strip():
+                flash("Primero conversa con Elias o pega la lista del cliente.", "error")
+                return redirect(url_for("ventas"))
 
-        cot_id = crear_cotizacion_desde_items(cliente, telefono, texto, items, fuente, raw)
-        flash("Cotización generada correctamente con Elias.", "success")
-        return redirect(url_for("ver_cotizacion", cotizacion_id=cot_id))
+            data, fuente, raw = extraer_items_desde_sesion_ventas(sesion["id"])
+            items = data.get("items", []) if isinstance(data, dict) else []
+            if not items:
+                flash("Elias no detectó productos cotizables en la conversación.", "error")
+                return redirect(url_for("ventas"))
 
+            cot_id = crear_cotizacion_desde_items(cliente, telefono, contexto, items, fuente, raw, sesion["id"])
+            guardar_mensaje_ventas(sesion["id"], "assistant", f"Generé el borrador de cotización. Revisa los productos marcados como REVISAR antes de enviarla. Cotización ID: {cot_id}", "sistema", 0)
+            flash("Borrador de cotización generado. Revisa los matches antes de enviarlo.", "success")
+            return redirect(url_for("ver_cotizacion", cotizacion_id=cot_id))
+
+    sesion = obtener_sesion_ventas()
+    mensajes = mensajes_sesion_ventas(sesion["id"])
     last_import = query_one("SELECT * FROM producto_importaciones ORDER BY id DESC LIMIT 1")
     recent = query_all("SELECT * FROM cotizaciones ORDER BY id DESC LIMIT 15")
     stats = {
@@ -3481,7 +3951,7 @@ def ventas():
     <div class="page-head">
         <div>
             <h1>Ventas / Cotización IA</h1>
-            <p>Elias genera cotizaciones usando la maestra de productos, stock, margen y contribución.</p>
+            <p>Conversa con Elias, ordena el pedido y genera la cotización solo cuando el vendedor lo decida.</p>
         </div>
     </div>
 
@@ -3494,9 +3964,9 @@ def ventas():
     <div class="card" style="margin-top:18px;">
         <div class="section-title">
             <div>
-                <h2>Estado de productos</h2>
+                <h2>Estado de maestra de productos</h2>
                 {% if last_import %}
-                <p class="muted">Última actualización maestra: <b>{{ last_import.created_at }}</b> · {{ last_import.archivo_nombre }} · {{ last_import.total_filas }} filas.</p>
+                <p class="muted">Última actualización: <b>{{ last_import.created_at }}</b> · {{ last_import.archivo_nombre }} · {{ last_import.total_filas }} filas.</p>
                 {% else %}
                 <p class="muted">No hay maestra de productos importada. Debe importarse antes de cotizar.</p>
                 {% endif %}
@@ -3505,47 +3975,76 @@ def ventas():
         </div>
     </div>
 
-    <div class="ai-panel">
-        <h2 style="margin-top:0;">Elias · Asistente de ventas</h2>
-        <p class="subtle">Pega la lista del cliente o adjunta una imagen. Elias extrae productos y cantidades; el sistema cruza contra la maestra para calcular precio, stock, margen y contribución.</p>
-        {% if not stats.api_ok %}
-            <div class="flash error">OPENAI_API_KEY no está configurada. Elias usará extracción local básica hasta que configures la API.</div>
-        {% endif %}
-        <form method="post" enctype="multipart/form-data">
-            <div class="form-row-2">
+    <div class="sales-layout" style="margin-top:18px;">
+        <div class="ai-panel">
+            <h2 style="margin-top:0;">Elias · Chat de ventas</h2>
+            <p class="subtle">Habla con Elias igual que con un asistente. Pega la lista del cliente o adjunta una imagen. La cotización no se genera hasta presionar el botón lateral.</p>
+
+            {% if not stats.api_ok %}
+                <div class="flash error">OPENAI_API_KEY no está configurada. Elias funcionará con extracción local básica.</div>
+            {% endif %}
+
+            <div class="chat-box">
+                {% if mensajes %}
+                    {% for m in mensajes %}
+                    <div class="chat-msg {{ 'user' if m.rol == 'user' else 'assistant' }}">{{ m.contenido }}</div>
+                    {% endfor %}
+                {% else %}
+                    <div class="chat-msg assistant">Hola, soy Elias. Pégame la lista del cliente o adjunta una imagen. Primero ordenamos el pedido y después puedes generar la cotización con el botón lateral.</div>
+                {% endif %}
+            </div>
+
+            <form method="post" enctype="multipart/form-data" style="margin-top:14px;">
+                <input type="hidden" name="action" value="chat">
                 <div>
+                    <label>Mensaje para Elias</label>
+                    <textarea name="mensaje" placeholder="Ej: Cliente pide plancha volcanita 10mm, fibrocemento 5mm, palo pino 2x3, zinc alum 0,4mm x 3mt..."></textarea>
+                </div>
+                <div style="margin-top:12px;">
+                    <label>Imagen de lista o pedido</label>
+                    <input type="file" name="imagen_pedido" accept="image/*">
+                </div>
+                <div class="actions">
+                    <button class="btn" style="background:linear-gradient(135deg,#14b8a6,#2563eb);color:white;">Enviar a Elias</button>
+                    <button class="btn btn-secondary" name="action" value="nueva_conversacion" formnovalidate>Nueva conversación</button>
+                </div>
+            </form>
+        </div>
+
+        <div class="side-card">
+            <h3 style="margin-top:0;">Generar cotización</h3>
+            <p class="muted">Cuando Elias ya ordenó el pedido, genera el borrador. Los matches dudosos quedarán marcados como <b>REVISAR</b> y no se sumarán al total.</p>
+            <form method="post">
+                <input type="hidden" name="action" value="generar_cotizacion">
+                <div style="margin-bottom:12px;">
                     <label>Cliente</label>
-                    <input name="cliente" placeholder="Opcional">
+                    <input name="cliente" value="{{ sesion.cliente or '' }}" placeholder="Opcional">
                 </div>
-                <div>
+                <div style="margin-bottom:12px;">
                     <label>Teléfono / WhatsApp</label>
-                    <input name="telefono" placeholder="Opcional">
+                    <input name="telefono" value="{{ sesion.telefono or '' }}" placeholder="Opcional">
                 </div>
+                <button class="btn btn-primary" style="width:100%;justify-content:center;">Generar cotización</button>
+            </form>
+
+            <div class="placeholder" style="margin-top:16px;">
+                <b>Regla de seguridad</b><br>
+                Elias conversa y ordena. La cotización se crea solo con este botón. No se aceptan matches débiles como venta válida.
             </div>
-            <div style="margin-top:14px;">
-                <label>Lista de productos del cliente</label>
-                <textarea name="pedido_texto" placeholder="Ej: 10 sacos de cemento, 5 planchas OSB, 2 cajas de tornillos..."></textarea>
-            </div>
-            <div style="margin-top:14px;">
-                <label>Imagen de lista o pedido</label>
-                <input type="file" name="imagen_pedido" accept="image/*">
-            </div>
-            <div class="actions">
-                <button class="btn" style="background:linear-gradient(135deg,#14b8a6,#2563eb);color:white;">Generar cotización con Elias</button>
-            </div>
-        </form>
+        </div>
     </div>
 
     <div class="card" style="margin-top:18px;">
         <h2>Cotizaciones recientes</h2>
         <div class="table-wrap">
             <table>
-                <tr><th>Número</th><th>Fecha</th><th>Cliente</th><th>Total bruto</th><th>Contribución</th><th>Margen</th><th>Usuario</th><th>Acción</th></tr>
+                <tr><th>Número</th><th>Fecha</th><th>Cliente</th><th>Estado</th><th>Total bruto</th><th>Contribución</th><th>Margen</th><th>Usuario</th><th>Acción</th></tr>
                 {% for c in recent %}
                 <tr>
                     <td>{{ c.numero }}</td>
                     <td>{{ c.created_at }}</td>
                     <td>{{ c.cliente }}</td>
+                    <td><span class="badge {% if c.estado == 'Requiere revisión' %}warn{% else %}ok{% endif %}">{{ c.estado }}</span></td>
                     <td>{{ c.subtotal_bruto|money }}</td>
                     <td>{{ c.contribucion_total|money }}</td>
                     <td>{{ c.margen_total_pct|percent }}</td>
@@ -3553,12 +4052,13 @@ def ventas():
                     <td><a class="btn btn-secondary btn-small" href="{{ url_for('ver_cotizacion', cotizacion_id=c.id) }}">Ver</a></td>
                 </tr>
                 {% else %}
-                <tr><td colspan="8" class="muted">Sin cotizaciones.</td></tr>
+                <tr><td colspan="9" class="muted">Sin cotizaciones.</td></tr>
                 {% endfor %}
             </table>
         </div>
     </div>
-    """, last_import=last_import, recent=recent, stats=stats, has_perm=has_perm)
+    """, last_import=last_import, recent=recent, stats=stats, mensajes=mensajes,
+       sesion=sesion, has_perm=has_perm)
 
 
 @app.route("/cotizaciones/<int:cotizacion_id>")
@@ -3570,12 +4070,13 @@ def ver_cotizacion(cotizacion_id):
         flash("Cotización no encontrada.", "error")
         return redirect(url_for("ventas"))
     items = query_all("SELECT * FROM cotizacion_items WHERE cotizacion_id = ? ORDER BY id", (cotizacion_id,))
+    revisar_count = query_one("SELECT COUNT(*) c FROM cotizacion_items WHERE cotizacion_id=? AND (encontrado=0 OR requiere_revision=1)", (cotizacion_id,))["c"]
 
     return render_page("Cotización", r"""
     <div class="page-head">
         <div>
             <h1>Cotización {{ cot.numero }}</h1>
-            <p>Generada por {{ cot.usuario_nombre }} el {{ cot.created_at }} · Fuente: {{ cot.fuente }}</p>
+            <p>Generada por {{ cot.usuario_nombre }} el {{ cot.created_at }} · Fuente: {{ cot.fuente }} · Estado: <b>{{ cot.estado }}</b></p>
         </div>
         <div class="actions">
             <a class="btn btn-secondary" href="{{ url_for('ventas') }}">Volver a ventas</a>
@@ -3583,8 +4084,14 @@ def ver_cotizacion(cotizacion_id):
         </div>
     </div>
 
+    {% if revisar_count > 0 %}
+    <div class="flash error">
+        Hay {{ revisar_count }} línea(s) que requieren revisión. No se sumaron al total si no tuvieron match confiable.
+    </div>
+    {% endif %}
+
     <div class="grid grid-4">
-        <div class="quote-total"><span class="muted">Total bruto</span><h2>{{ cot.subtotal_bruto|money }}</h2></div>
+        <div class="quote-total"><span class="muted">Total bruto confirmado</span><h2>{{ cot.subtotal_bruto|money }}</h2></div>
         <div class="quote-total"><span class="muted">Venta neta</span><h2>{{ cot.venta_neta_total|money }}</h2></div>
         <div class="quote-total"><span class="muted">Contribución</span><h2>{{ cot.contribucion_total|money }}</h2></div>
         <div class="quote-total"><span class="muted">Margen</span><h2>{{ cot.margen_total_pct|percent }}</h2></div>
@@ -3595,16 +4102,24 @@ def ver_cotizacion(cotizacion_id):
         <div class="table-wrap">
             <table>
                 <tr>
-                    <th>Match</th><th>Código</th><th>Solicitado</th><th>Producto encontrado</th>
+                    <th>Estado</th><th>Código</th><th>Solicitado</th><th>Producto encontrado / candidato</th>
                     <th>Cant.</th><th>Stock</th><th>Compra neto</th><th>Venta bruto</th>
-                    <th>Subtotal bruto</th><th>Contribución</th><th>Margen</th>
+                    <th>Subtotal bruto</th><th>Contribución</th><th>Margen</th><th>Score</th>
                 </tr>
                 {% for i in items %}
                 <tr>
-                    <td>{% if i.encontrado %}<span class="match-ok">OK</span>{% else %}<span class="match-bad">No encontrado</span>{% endif %}</td>
+                    <td>
+                        {% if i.encontrado %}
+                            <span class="match-ok">OK</span>
+                        {% elif i.requiere_revision %}
+                            <span class="match-review">REVISAR</span>
+                        {% else %}
+                            <span class="match-bad">No encontrado</span>
+                        {% endif %}
+                    </td>
                     <td>{{ i.codigo_producto }}</td>
                     <td>{{ i.descripcion_solicitada }}</td>
-                    <td>{{ i.descripcion_producto }}</td>
+                    <td>{{ i.descripcion_producto }}<br><span class="muted">{{ i.observacion }}</span></td>
                     <td>{{ "%.2f"|format(i.cantidad or 0) }}</td>
                     <td>{{ "%.2f"|format(i.stock or 0) }}</td>
                     <td>{{ i.precio_compra_neto|money }}</td>
@@ -3612,6 +4127,11 @@ def ver_cotizacion(cotizacion_id):
                     <td>{{ i.subtotal_bruto|money }}</td>
                     <td>{{ i.contribucion_total|money }}</td>
                     <td>{{ i.margen_pct|percent }}</td>
+                    <td>
+                        {% if i.match_score is not none %}
+                            <span class="confidence {% if i.encontrado %}ok{% elif i.requiere_revision %}review{% else %}bad{% endif %}">{{ "%.1f"|format(i.match_score or 0) }}</span>
+                        {% endif %}
+                    </td>
                 </tr>
                 {% endfor %}
             </table>
@@ -3620,17 +4140,17 @@ def ver_cotizacion(cotizacion_id):
 
     <div class="grid grid-2">
         <div class="card">
-            <h3>Solicitud original</h3>
+            <h3>Conversación / solicitud original</h3>
             <pre style="white-space:pre-wrap;font-family:inherit;">{{ cot.texto_original }}</pre>
         </div>
         <div class="card">
-            <h3>Notas técnicas</h3>
-            <p class="muted">La contribución se calcula como venta neta menos precio compra neto. La venta neta se estima quitando IVA desde el precio venta bruto.</p>
+            <h3>Notas de control</h3>
+            <p class="muted">Esta versión no cotiza automáticamente. Elias conversa primero; la cotización se genera solo al presionar el botón.</p>
+            <p class="muted">Los productos con match débil quedan como REVISAR y no afectan el total bruto.</p>
             <p class="muted">IVA usado: {{ iva }}%</p>
         </div>
     </div>
-    """, cot=cot, items=items, iva=round(iva_rate()*100, 2))
-
+    """, cot=cot, items=items, iva=round(iva_rate()*100, 2), revisar_count=revisar_count)
 
 @app.route("/cotizaciones/<int:cotizacion_id>/excel")
 @login_required
