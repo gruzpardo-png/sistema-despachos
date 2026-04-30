@@ -24,7 +24,7 @@ from openpyxl import Workbook
 
 
 APP_NAME = "Ferretería Cloud Tool"
-APP_VERSION = "v4.5 Ventas Chat Elias"
+APP_VERSION = "v4.6 Chat Ventas Integrado"
 DB_PATH = os.environ.get("DATABASE_PATH", "ferreteria_cloud_tool.db")
 SECRET_KEY = os.environ.get("SECRET_KEY", "cambiar-esta-clave-en-render")
 
@@ -717,9 +717,12 @@ def respuesta_chat_elias(mensaje, contexto, imagen_file=None):
             "Eres Elias, asistente de ventas interno de Ferretería San Pedro. "
             "Conversas con el vendedor para ordenar el pedido del cliente. "
             "NO generes cotización ni precios automáticamente. "
-            "Si detectas productos, devuelve un resumen claro y pide confirmación o datos faltantes. "
-            "Si el pedido es ambiguo, pregunta. "
-            "Recuerda al final de forma breve: 'Cuando esté correcto, presiona Generar cotización'."
+            "NO inventes códigos, precios ni stock. "
+            "Si detectas productos, responde con formato de chat claro: 'Pedido ordenado:' y una lista por líneas. "
+            "Une medidas separadas con el producto anterior. Ejemplo: 'Plancha fibrocemento' + '5 mm' debe quedar 'Plancha fibrocemento 5 mm'. "
+            "Dimensiones como 0,4 mm x 3 mt NO son cantidades, son especificaciones. "
+            "Si el pedido es ambiguo, pregunta una sola cosa concreta. "
+            "Termina siempre con: 'Cuando esté correcto, presiona Generar cotización'."
         )
 
         user_content = [{"type": "input_text", "text": f"Contexto anterior:\n{contexto}\n\nNuevo mensaje:\n{mensaje}"}]
@@ -736,6 +739,9 @@ def respuesta_chat_elias(mensaje, contexto, imagen_file=None):
         )
         return (getattr(response, "output_text", None) or str(response)).strip(), "openai"
     except Exception as exc:
+        error_text = str(exc)
+        if "No module named 'openai'" in error_text:
+            return "No pude consultar IA porque falta instalar la librería OpenAI en Render. Revisa que requirements.txt tenga openai>=1.100.0 y redeploya con Clear build cache. Mientras tanto puedes generar cotización con extracción local.", "local"
         return f"No pude consultar IA en este momento ({exc}). Puedes pegar la lista y luego presionar Generar cotización para usar extracción local.", "local"
 
 
@@ -786,6 +792,63 @@ def contexto_conversacion_ventas(sesion_id):
 def extraer_items_desde_sesion_ventas(sesion_id):
     contexto = contexto_conversacion_ventas(sesion_id)
     return extraer_items_con_elias(contexto, None)
+
+
+def row_to_dict(row):
+    return dict(row) if row else None
+
+
+def cotizacion_chat_data(cotizacion_id):
+    cot = query_one("SELECT * FROM cotizaciones WHERE id = ?", (cotizacion_id,))
+    if not cot:
+        return None
+    items = query_all("SELECT * FROM cotizacion_items WHERE cotizacion_id = ? ORDER BY id", (cotizacion_id,))
+    revisar_count = query_one(
+        "SELECT COUNT(*) c FROM cotizacion_items WHERE cotizacion_id=? AND (encontrado=0 OR requiere_revision=1)",
+        (cotizacion_id,)
+    )["c"]
+    return {
+        "cot": row_to_dict(cot),
+        "items": [row_to_dict(i) for i in items],
+        "revisar_count": revisar_count,
+    }
+
+
+def mensajes_sesion_ventas_render(sesion_id):
+    mensajes = mensajes_sesion_ventas(sesion_id)
+    salida = []
+    for m in mensajes:
+        d = row_to_dict(m)
+        d["quote"] = None
+        if d.get("rol") == "quote":
+            try:
+                payload = json.loads(d.get("ai_raw") or "{}")
+                d["quote"] = cotizacion_chat_data(payload.get("cotizacion_id"))
+            except Exception:
+                d["quote"] = None
+        salida.append(d)
+    return salida
+
+
+def resumen_cotizacion_chat(cotizacion_id):
+    data = cotizacion_chat_data(cotizacion_id)
+    if not data:
+        return "Cotización generada, pero no se pudo cargar el resumen."
+    cot = data["cot"]
+    revisar = data["revisar_count"]
+    return (
+        f"Cotización {cot['numero']} generada en el chat.\n"
+        f"Total bruto confirmado: {money(cot['subtotal_bruto'])}\n"
+        f"Venta neta: {money(cot['venta_neta_total'])}\n"
+        f"Contribución: {money(cot['contribucion_total'])}\n"
+        f"Margen: {percent(cot['margen_total_pct'])}\n"
+        f"Revisión pendiente: {revisar} línea(s)."
+    )
+
+
+def format_clp(value):
+    return money(value)
+
 
 def generar_numero_cotizacion(cotizacion_id):
     return f"COT-{today_str().replace('-', '')}-{int(cotizacion_id):06d}"
@@ -1919,40 +1982,110 @@ BASE_TEMPLATE = r"""
         .match-bad{color:#b91c1c;font-weight:800}
         .sales-layout{
             display:grid;
-            grid-template-columns:minmax(0,1fr) 330px;
+            grid-template-columns:minmax(0,1fr) 360px;
             gap:18px;
             align-items:start;
         }
+        .chat-shell{
+            min-height:680px;
+            display:flex;
+            flex-direction:column;
+        }
         .chat-box{
-            background:rgba(255,255,255,.06);
+            background:
+                radial-gradient(circle at top right, rgba(37,99,235,.15), transparent 24%),
+                rgba(255,255,255,.045);
             border:1px solid rgba(148,163,184,.25);
-            border-radius:18px;
-            padding:14px;
-            max-height:520px;
+            border-radius:20px;
+            padding:18px;
+            height:560px;
             overflow:auto;
             display:flex;
             flex-direction:column;
-            gap:12px;
+            gap:14px;
+            scroll-behavior:smooth;
         }
         .chat-msg{
-            max-width:86%;
-            border-radius:16px;
+            max-width:82%;
+            border-radius:18px;
             padding:12px 14px;
             white-space:pre-wrap;
             line-height:1.45;
             font-size:14px;
+            box-shadow:0 10px 24px rgba(2,6,23,.16);
         }
         .chat-msg.user{
             align-self:flex-end;
-            background:rgba(20,184,166,.20);
-            border:1px solid rgba(45,212,191,.35);
+            background:linear-gradient(135deg, rgba(20,184,166,.35), rgba(14,116,144,.35));
+            border:1px solid rgba(45,212,191,.38);
             color:#ecfeff;
+            border-bottom-right-radius:6px;
         }
         .chat-msg.assistant{
             align-self:flex-start;
-            background:rgba(15,23,42,.65);
+            background:rgba(15,23,42,.72);
             border:1px solid rgba(96,165,250,.30);
             color:#e5eefb;
+            border-bottom-left-radius:6px;
+        }
+        .chat-msg.quote{
+            align-self:stretch;
+            max-width:100%;
+            background:#ffffff;
+            color:#0f172a;
+            border:1px solid #dbeafe;
+            border-radius:20px;
+            padding:0;
+            overflow:hidden;
+            white-space:normal;
+        }
+        .quote-chat-head{
+            background:linear-gradient(135deg,#0f766e,#2563eb);
+            color:white;
+            padding:14px 16px;
+            display:flex;
+            justify-content:space-between;
+            gap:12px;
+            align-items:flex-start;
+        }
+        .quote-chat-body{padding:14px 16px}
+        .quote-chat-totals{
+            display:grid;
+            grid-template-columns:repeat(4,minmax(0,1fr));
+            gap:10px;
+            margin:12px 0;
+        }
+        .quote-chip{
+            border:1px solid #e5e7eb;
+            border-radius:14px;
+            padding:10px;
+            background:#f8fafc;
+        }
+        .quote-chip span{display:block;color:#64748b;font-size:11px}
+        .quote-chip strong{display:block;margin-top:4px;font-size:15px}
+        .quote-table-mini{
+            width:100%;
+            border-collapse:collapse;
+            border:1px solid #e5e7eb;
+            border-radius:12px;
+            overflow:hidden;
+            font-size:12px;
+        }
+        .quote-table-mini th,.quote-table-mini td{
+            padding:8px;
+            border-bottom:1px solid #e5e7eb;
+            vertical-align:top;
+        }
+        .chat-compose{
+            border:1px solid rgba(148,163,184,.25);
+            background:rgba(15,23,42,.58);
+            border-radius:20px;
+            padding:14px;
+            margin-top:14px;
+        }
+        .chat-compose textarea{
+            min-height:92px;
+            max-height:180px;
         }
         .side-card{
             background:white;
@@ -1960,6 +2093,8 @@ BASE_TEMPLATE = r"""
             border-radius:18px;
             padding:18px;
             box-shadow:var(--shadow);
+            position:sticky;
+            top:90px;
         }
         .confidence{
             display:inline-flex;
@@ -3932,12 +4067,18 @@ def ventas():
                 return redirect(url_for("ventas"))
 
             cot_id = crear_cotizacion_desde_items(cliente, telefono, contexto, items, fuente, raw, sesion["id"])
-            guardar_mensaje_ventas(sesion["id"], "assistant", f"Generé el borrador de cotización. Revisa los productos marcados como REVISAR antes de enviarla. Cotización ID: {cot_id}", "sistema", 0)
-            flash("Borrador de cotización generado. Revisa los matches antes de enviarlo.", "success")
-            return redirect(url_for("ver_cotizacion", cotizacion_id=cot_id))
+            guardar_mensaje_ventas(
+                sesion["id"],
+                "quote",
+                resumen_cotizacion_chat(cot_id),
+                json.dumps({"cotizacion_id": cot_id}, ensure_ascii=False),
+                0
+            )
+            flash("Cotización generada dentro del chat. Puedes seguir conversando o descargar PDF.", "success")
+            return redirect(url_for("ventas") + "#chat-bottom")
 
     sesion = obtener_sesion_ventas()
-    mensajes = mensajes_sesion_ventas(sesion["id"])
+    mensajes = mensajes_sesion_ventas_render(sesion["id"])
     last_import = query_one("SELECT * FROM producto_importaciones ORDER BY id DESC LIMIT 1")
     recent = query_all("SELECT * FROM cotizaciones ORDER BY id DESC LIMIT 15")
     stats = {
@@ -3951,7 +4092,7 @@ def ventas():
     <div class="page-head">
         <div>
             <h1>Ventas / Cotización IA</h1>
-            <p>Conversa con Elias, ordena el pedido y genera la cotización solo cuando el vendedor lo decida.</p>
+            <p>Chat de ventas con Elias. La conversación baja como chat normal y la cotización aparece dentro del mismo flujo.</p>
         </div>
     </div>
 
@@ -3978,27 +4119,91 @@ def ventas():
     <div class="sales-layout" style="margin-top:18px;">
         <div class="ai-panel">
             <h2 style="margin-top:0;">Elias · Chat de ventas</h2>
-            <p class="subtle">Habla con Elias igual que con un asistente. Pega la lista del cliente o adjunta una imagen. La cotización no se genera hasta presionar el botón lateral.</p>
+            <p class="subtle">Pega la lista, conversa y corrige el pedido con Elias. Cuando esté listo, genera la cotización sin salir del chat.</p>
 
             {% if not stats.api_ok %}
                 <div class="flash error">OPENAI_API_KEY no está configurada. Elias funcionará con extracción local básica.</div>
             {% endif %}
 
-            <div class="chat-box">
+            <div class="chat-box" id="chatBox">
                 {% if mensajes %}
                     {% for m in mensajes %}
-                    <div class="chat-msg {{ 'user' if m.rol == 'user' else 'assistant' }}">{{ m.contenido }}</div>
+                        {% if m.rol == 'quote' and m.quote %}
+                            {% set q = m.quote['cot'] %}
+                            <div class="chat-msg quote">
+                                <div class="quote-chat-head">
+                                    <div>
+                                        <strong>Cotización {{ q.numero }}</strong><br>
+                                        <small>{{ q.created_at }} · {{ q.estado }}</small>
+                                    </div>
+                                    <div style="text-align:right;">
+                                        <strong>{{ q.subtotal_bruto|money }}</strong><br>
+                                        <small>Total bruto confirmado</small>
+                                    </div>
+                                </div>
+                                <div class="quote-chat-body">
+                                    {% if m.quote['revisar_count'] > 0 %}
+                                    <div class="flash error" style="margin-bottom:10px;">
+                                        {{ m.quote['revisar_count'] }} línea(s) requieren revisión. No se sumaron al total si no tuvieron match confiable.
+                                    </div>
+                                    {% endif %}
+
+                                    <div class="quote-chat-totals">
+                                        <div class="quote-chip"><span>Total bruto</span><strong>{{ q.subtotal_bruto|money }}</strong></div>
+                                        <div class="quote-chip"><span>Venta neta</span><strong>{{ q.venta_neta_total|money }}</strong></div>
+                                        <div class="quote-chip"><span>Contribución</span><strong>{{ q.contribucion_total|money }}</strong></div>
+                                        <div class="quote-chip"><span>Margen</span><strong>{{ q.margen_total_pct|percent }}</strong></div>
+                                    </div>
+
+                                    <table class="quote-table-mini">
+                                        <tr><th>Estado</th><th>Código</th><th>Producto</th><th>Cant.</th><th>P. Unit.</th><th>Valor</th></tr>
+                                        {% for i in m.quote['items'][:8] %}
+                                        <tr>
+                                            <td>
+                                                {% if i.encontrado %}<span class="match-ok">OK</span>
+                                                {% else %}<span class="match-review">REVISAR</span>{% endif %}
+                                            </td>
+                                            <td>{{ i.codigo_producto }}</td>
+                                            <td>
+                                                {% if i.encontrado %}
+                                                    {{ i.descripcion_producto }}
+                                                {% else %}
+                                                    <b>{{ i.descripcion_solicitada }}</b><br><span class="muted">{{ i.descripcion_producto }}</span>
+                                                {% endif %}
+                                            </td>
+                                            <td>{{ "%.2f"|format(i.cantidad or 0) }}</td>
+                                            <td>{{ i.precio_venta_bruto|money }}</td>
+                                            <td>{{ i.subtotal_bruto|money }}</td>
+                                        </tr>
+                                        {% endfor %}
+                                    </table>
+
+                                    {% if m.quote['items']|length > 8 %}
+                                        <p class="muted" style="margin:8px 0 0;">Se muestran 8 de {{ m.quote['items']|length }} líneas. Abre el detalle para revisar todo.</p>
+                                    {% endif %}
+
+                                    <div class="actions" style="margin-top:12px;">
+                                        <a class="btn btn-secondary btn-small" href="{{ url_for('ver_cotizacion', cotizacion_id=q.id) }}">Ver detalle</a>
+                                        <a class="btn btn-primary btn-small" href="{{ url_for('pdf_cotizacion', cotizacion_id=q.id) }}">PDF</a>
+                                        <a class="btn btn-secondary btn-small" href="{{ url_for('export_cotizacion', cotizacion_id=q.id) }}">Excel</a>
+                                    </div>
+                                </div>
+                            </div>
+                        {% else %}
+                            <div class="chat-msg {{ 'user' if m.rol == 'user' else 'assistant' }}">{{ m.contenido }}</div>
+                        {% endif %}
                     {% endfor %}
                 {% else %}
                     <div class="chat-msg assistant">Hola, soy Elias. Pégame la lista del cliente o adjunta una imagen. Primero ordenamos el pedido y después puedes generar la cotización con el botón lateral.</div>
                 {% endif %}
+                <div id="chat-bottom"></div>
             </div>
 
-            <form method="post" enctype="multipart/form-data" style="margin-top:14px;">
+            <form method="post" enctype="multipart/form-data" class="chat-compose">
                 <input type="hidden" name="action" value="chat">
                 <div>
                     <label>Mensaje para Elias</label>
-                    <textarea name="mensaje" placeholder="Ej: Cliente pide plancha volcanita 10mm, fibrocemento 5mm, palo pino 2x3, zinc alum 0,4mm x 3mt..."></textarea>
+                    <textarea name="mensaje" id="mensajeElias" placeholder="Pega aquí la lista del cliente o continúa la conversación..."></textarea>
                 </div>
                 <div style="margin-top:12px;">
                     <label>Imagen de lista o pedido</label>
@@ -4009,11 +4214,20 @@ def ventas():
                     <button class="btn btn-secondary" name="action" value="nueva_conversacion" formnovalidate>Nueva conversación</button>
                 </div>
             </form>
+
+            <script>
+                (function(){
+                    const box = document.getElementById("chatBox");
+                    if (box) { box.scrollTop = box.scrollHeight; }
+                    const txt = document.getElementById("mensajeElias");
+                    if (txt) { txt.focus(); }
+                })();
+            </script>
         </div>
 
         <div class="side-card">
             <h3 style="margin-top:0;">Generar cotización</h3>
-            <p class="muted">Cuando Elias ya ordenó el pedido, genera el borrador. Los matches dudosos quedarán marcados como <b>REVISAR</b> y no se sumarán al total.</p>
+            <p class="muted">La cotización se mostrará dentro del chat. Luego puedes descargar PDF o Excel y seguir conversando con Elias.</p>
             <form method="post">
                 <input type="hidden" name="action" value="generar_cotizacion">
                 <div style="margin-bottom:12px;">
@@ -4024,7 +4238,7 @@ def ventas():
                     <label>Teléfono / WhatsApp</label>
                     <input name="telefono" value="{{ sesion.telefono or '' }}" placeholder="Opcional">
                 </div>
-                <button class="btn btn-primary" style="width:100%;justify-content:center;">Generar cotización</button>
+                <button class="btn btn-primary" style="width:100%;justify-content:center;">Generar cotización en el chat</button>
             </form>
 
             <div class="placeholder" style="margin-top:16px;">
@@ -4080,7 +4294,8 @@ def ver_cotizacion(cotizacion_id):
         </div>
         <div class="actions">
             <a class="btn btn-secondary" href="{{ url_for('ventas') }}">Volver a ventas</a>
-            <a class="btn btn-primary" href="{{ url_for('export_cotizacion', cotizacion_id=cot.id) }}">Exportar Excel</a>
+            <a class="btn btn-primary" href="{{ url_for('pdf_cotizacion', cotizacion_id=cot.id) }}">Descargar PDF</a>
+            <a class="btn btn-secondary" href="{{ url_for('export_cotizacion', cotizacion_id=cot.id) }}">Exportar Excel</a>
         </div>
     </div>
 
@@ -4151,6 +4366,154 @@ def ver_cotizacion(cotizacion_id):
         </div>
     </div>
     """, cot=cot, items=items, iva=round(iva_rate()*100, 2), revisar_count=revisar_count)
+
+
+@app.route("/cotizaciones/<int:cotizacion_id>/pdf")
+@login_required
+@permission_required("ventas")
+def pdf_cotizacion(cotizacion_id):
+    cot = query_one("SELECT * FROM cotizaciones WHERE id = ?", (cotizacion_id,))
+    if not cot:
+        flash("Cotización no encontrada.", "error")
+        return redirect(url_for("ventas"))
+
+    items = query_all("""
+        SELECT * FROM cotizacion_items
+        WHERE cotizacion_id = ? AND encontrado = 1
+        ORDER BY id
+    """, (cotizacion_id,))
+    revisar_count = query_one(
+        "SELECT COUNT(*) c FROM cotizacion_items WHERE cotizacion_id=? AND (encontrado=0 OR requiere_revision=1)",
+        (cotizacion_id,)
+    )["c"]
+
+    try:
+        from xml.sax.saxutils import escape as xml_escape
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    except Exception as exc:
+        flash(f"No se pudo generar PDF porque falta ReportLab: {exc}", "error")
+        return redirect(url_for("ver_cotizacion", cotizacion_id=cotizacion_id))
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=1.2*cm,
+        rightMargin=1.2*cm,
+        topMargin=1.2*cm,
+        bottomMargin=1.2*cm,
+    )
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "TitleFerreteria",
+        parent=styles["Title"],
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor("#0f172a"),
+        alignment=0,
+    )
+    small_style = ParagraphStyle(
+        "Small",
+        parent=styles["Normal"],
+        fontSize=8,
+        leading=10,
+        textColor=colors.HexColor("#334155"),
+    )
+    normal = styles["Normal"]
+
+    story = []
+    story.append(Paragraph("FERRETERÍA CLOUD TOOL", title_style))
+    story.append(Paragraph("Cotización comercial generada por Elias / RUZ AI Systems", small_style))
+    story.append(Spacer(1, 8))
+
+    header_data = [
+        ["N° Cotización", cot["numero"], "Fecha", cot["created_at"]],
+        ["Cliente", cot["cliente"] or "Cliente", "Teléfono", cot["telefono"] or ""],
+        ["Vendedor", cot["usuario_nombre"] or "", "Estado", cot["estado"] or ""],
+    ]
+    header_table = Table(header_data, colWidths=[3.1*cm, 6.1*cm, 2.4*cm, 6.0*cm])
+    header_table.setStyle(TableStyle([
+        ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#cbd5e1")),
+        ("BACKGROUND", (0,0), (0,-1), colors.HexColor("#f1f5f9")),
+        ("BACKGROUND", (2,0), (2,-1), colors.HexColor("#f1f5f9")),
+        ("FONTNAME", (0,0), (0,-1), "Helvetica-Bold"),
+        ("FONTNAME", (2,0), (2,-1), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (-1,-1), 8),
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING", (0,0), (-1,-1), 6),
+        ("RIGHTPADDING", (0,0), (-1,-1), 6),
+    ]))
+    story.append(header_table)
+    story.append(Spacer(1, 12))
+
+    data = [["Código", "Descripción", "Cantidad", "Precio Unit.", "Valor"]]
+    for i in items:
+        data.append([
+            i["codigo_producto"] or "",
+            Paragraph(xml_escape(str(i["descripcion_producto"] or "")), small_style),
+            f"{float(i['cantidad'] or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
+            format_clp(i["precio_venta_bruto"]),
+            format_clp(i["subtotal_bruto"]),
+        ])
+
+    if len(data) == 1:
+        data.append(["", "Sin líneas confirmadas. Revisar cotización interna.", "", "", ""])
+
+    table = Table(data, colWidths=[3.0*cm, 8.3*cm, 2.1*cm, 2.7*cm, 2.7*cm], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#0f766e")),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#d1d5db")),
+        ("FONTSIZE", (0,0), (-1,-1), 8),
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("ALIGN", (2,1), (-1,-1), "RIGHT"),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#f8fafc")]),
+    ]))
+    story.append(table)
+    story.append(Spacer(1, 12))
+
+    totals_data = [
+        ["Neto", format_clp(cot["venta_neta_total"])],
+        [f"IVA {round(iva_rate()*100, 2)}%", format_clp(float(cot["subtotal_bruto"] or 0) - float(cot["venta_neta_total"] or 0))],
+        ["Total", format_clp(cot["subtotal_bruto"])],
+    ]
+    totals = Table(totals_data, colWidths=[4*cm, 4*cm], hAlign="RIGHT")
+    totals.setStyle(TableStyle([
+        ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#cbd5e1")),
+        ("BACKGROUND", (0,0), (0,-1), colors.HexColor("#f1f5f9")),
+        ("FONTNAME", (0,0), (-1,-1), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (-1,-1), 9),
+        ("ALIGN", (1,0), (1,-1), "RIGHT"),
+        ("BACKGROUND", (0,2), (-1,2), colors.HexColor("#dcfce7")),
+    ]))
+    story.append(totals)
+    story.append(Spacer(1, 12))
+
+    condiciones = (
+        "CONDICIONES COMERCIALES<br/>"
+        "1.- Validez de la oferta: 3 días.<br/>"
+        "2.- Plazo de entrega: sujeto a disponibilidad de stock.<br/>"
+        "3.- No incluye flete ni embalaje, salvo indicación expresa."
+    )
+    if revisar_count:
+        condiciones += f"<br/><b>Nota interna:</b> {revisar_count} línea(s) quedaron pendientes de revisión y no fueron incluidas en este PDF comercial."
+    story.append(Paragraph(condiciones, small_style))
+
+    doc.build(story)
+    buffer.seek(0)
+    return send_file(
+        buffer,
+        as_attachment=True,
+        download_name=f"{cot['numero']}.pdf",
+        mimetype="application/pdf"
+    )
+
+
 
 @app.route("/cotizaciones/<int:cotizacion_id>/excel")
 @login_required

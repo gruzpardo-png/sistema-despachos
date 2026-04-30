@@ -167,3 +167,40 @@ Cambios:
 - Las coincidencias dudosas quedan como REVISAR y no se suman al total.
 - Agrega tablas ventas_chat_sesiones y ventas_chat_mensajes.
 - No borra base de datos ni tablas existentes.
+
+
+## v4.5.1 Fix OpenAI
+
+Corrige el problema de despliegue cuando Render no instala la librería OpenAI.
+
+`requirements.txt` debe contener:
+
+```txt
+openai>=1.100.0
+```
+
+Después de subir esta versión, en Render ejecutar:
+
+```txt
+Manual Deploy -> Clear build cache & deploy
+```
+
+Variables necesarias:
+
+```txt
+OPENAI_API_KEY=tu_api_key
+OPENAI_MODEL=gpt-5.4-mini
+DATABASE_PATH=/data/ferreteria_cloud_tool.db
+IVA_RATE=0.19
+```
+
+
+## v4.6 Chat Ventas Integrado
+
+- Conversación de Elias rediseñada como chat moderno.
+- Los mensajes se muestran en orden natural y el chat baja automáticamente al último mensaje.
+- La cotización generada aparece dentro del mismo chat como tarjeta comercial.
+- Desde la tarjeta se puede abrir detalle, descargar PDF o exportar Excel.
+- El vendedor puede seguir conversando después de generar la cotización.
+- Agrega exportación PDF con formato comercial básico.
+- Matching estricto: líneas dudosas quedan como REVISAR y no se suman al total.
