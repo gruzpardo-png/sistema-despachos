@@ -24,7 +24,7 @@ from openpyxl import Workbook
 
 
 APP_NAME = "Ferretería Cloud Tool"
-APP_VERSION = "v4.7 Simplificado Operación"
+APP_VERSION = "v4.7.1 Login Brand"
 DB_PATH = os.environ.get("DATABASE_PATH", "ferreteria_cloud_tool.db")
 SECRET_KEY = os.environ.get("SECRET_KEY", "cambiar-esta-clave-en-render")
 
@@ -2280,7 +2280,7 @@ def login():
             </form>
 
             <div style="margin-top:18px;text-align:center;color:#64748b;font-size:12px;letter-spacing:.12em;text-transform:uppercase;">
-                RUZ AI Systems
+                RUZ Technology company
             </div>
         </div>
     </div>
@@ -4590,7 +4590,7 @@ def pdf_cotizacion(cotizacion_id):
 
     story = []
     story.append(Paragraph("FERRETERÍA CLOUD TOOL", title_style))
-    story.append(Paragraph("Cotización comercial generada por Elias / RUZ AI Systems", small_style))
+    story.append(Paragraph("Cotización comercial generada por Elias / RUZ Technology company", small_style))
     story.append(Spacer(1, 8))
 
     header_data = [
